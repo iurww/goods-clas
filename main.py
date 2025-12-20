@@ -8,6 +8,7 @@ import os
 from tqdm import tqdm
 import numpy as np
 from sklearn.model_selection import train_test_split
+from transformers import get_cosine_schedule_with_warmup
 
 # ==================== 配置参数 ====================
 class Config:
@@ -18,9 +19,13 @@ class Config:
     test_images_dir = 'data/test_images'
     submission_file = 'data/submission.csv'
     
+    train_text_emb_file = 'data/qwen3_train_text_embs.npy'
+    test_text_emb_file = 'data/qwen3_test_text_embs.npy'
+    
     # 模型配置
     # 在线模式（需要网络）
     clip_model_name = './models/clip-vit-base-patch32'  # 可选: clip-vit-large-patch14
+    # clip_model_name = './models/clip-vit-large-patch14'
    
     num_classes = 21
     hidden_dims = [1024, 512]  # MLP隐藏层维度
@@ -31,18 +36,20 @@ class Config:
     num_epochs = 10
     learning_rate = 3e-5
     weight_decay = 1e-3
+    warm_up = 0.1
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    seed = 42
-    val_split = 0.01
+    seed = 43
+    val_split = 0.1
     
     # 其他
     max_text_length = 77  # CLIP默认最大长度
 
 # ==================== 数据集类 ====================
 class ProductDataset(Dataset):
-    def __init__(self, df, image_dir, processor, is_test=False):
+    def __init__(self, df, image_dir, text_emb, processor, is_test=False):
         self.df = df.reset_index(drop=True)
         self.image_dir = image_dir
+        self.text_emb = torch.tensor(text_emb, dtype=torch.float32)
         self.processor = processor
         self.is_test = is_test
         
@@ -56,26 +63,29 @@ class ProductDataset(Dataset):
         image_path = os.path.join(self.image_dir, f"{row['id']}.jpg")
         try:
             image = Image.open(image_path).convert('RGB')
+            image = image.resize((224, 224))
         except:
             # 如果图像加载失败，创建一个空白图像
-            image = Image.new('RGB', (100, 100), color='white')
+            image = Image.new('RGB', (224, 224), color='white')
         
         # 合并文本：title + description
         text = f"{row['description']}"
         
+        text_emb = self.text_emb[idx]
+        
         if not self.is_test:
             label = int(row['label'])
-            return image, text, label
+            return image, text, text_emb, label
         else:
-            return image, text, row['id']
+            return image, text, text_emb, row['id']
 
 # ==================== 自定义collate函数 ====================
 def collate_fn(batch, processor, is_test=False):
     """自定义batch整理函数"""
     if is_test:
-        images, texts, ids = zip(*batch)
+        images, texts, text_embs, ids = zip(*batch)
     else:
-        images, texts, labels = zip(*batch)
+        images, texts, text_embs, labels = zip(*batch)
     
     # 使用processor批量处理
     inputs = processor(
@@ -86,12 +96,13 @@ def collate_fn(batch, processor, is_test=False):
         truncation=True,
         max_length=Config.max_text_length
     )
+    text_embs = torch.tensor(np.array(text_embs), dtype=torch.float32)
     
     if is_test:
-        return inputs, ids
+        return inputs, text_embs, ids
     else:
         labels = torch.tensor(labels, dtype=torch.long)
-        return inputs, labels
+        return inputs, text_embs, labels
 
 # ==================== 模型定义 ====================
 class CLIPClassifier(nn.Module):
@@ -103,6 +114,7 @@ class CLIPClassifier(nn.Module):
             clip_model_name,
             ignore_mismatched_sizes=True
         )
+        print(self.clip)
         
         self._freeze_clip_layers()
         # 获取CLIP特征维度
@@ -110,7 +122,7 @@ class CLIPClassifier(nn.Module):
         
         # 构建MLP分类头
         layers = []
-        input_dim = clip_dim * 2  # 图像特征 + 文本特征
+        input_dim = clip_dim * 2 + 2560  # 图像特征 + 文本特征
         
         for hidden_dim in hidden_dims:
             layers.append(nn.Linear(input_dim, hidden_dim))
@@ -123,32 +135,49 @@ class CLIPClassifier(nn.Module):
         self.classifier = nn.Sequential(*layers)
     
     def _freeze_clip_layers(self):
-        """冻结CLIP的大部分层"""
-        # 冻结vision encoder的前75%层
-        for name, param in self.clip.vision_model.named_parameters():
-            if 'encoder.layers' in name:
-                layer_num = int(name.split('.')[3])
-                if layer_num < 9:  # 只微调最后3层(总共12层)
-                    param.requires_grad = False
-            else:
-                param.requires_grad = False
+        """冻结CLIP,只保留最后3层可训练"""
+        print("\n" + "="*60)
+        print("Setting up CLIP layers...")
+        print("="*60)
         
-        # 冻结text encoder的前75%层
-        for name, param in self.clip.text_model.named_parameters():
-            if 'encoder.layers' in name:
-                layer_num = int(name.split('.')[3])
-                if layer_num < 9:
-                    param.requires_grad = False
-            else:
-                param.requires_grad = False
+        # 1. 先冻结所有参数
+        for param in self.clip.parameters():
+            param.requires_grad = False
         
-        # projection层保持可训练
+        # 2. 解冻 Vision Encoder 最后3层 (layers 9, 10, 11)
+        vision_layers = self.clip.vision_model.encoder.layers
+        num_vision_layers = len(vision_layers)
+        unfreeze_from = num_vision_layers - 3  # 从第9层开始
+        
+        for i in range(unfreeze_from, num_vision_layers):
+            for param in vision_layers[i].parameters():
+                param.requires_grad = True
+        
+        print(f"✓ Vision Encoder: Unfrozen layers [{unfreeze_from}-{num_vision_layers-1}] (last 3 layers)")
+        
+        # 3. 解冻 Text Encoder 最后3层 (layers 9, 10, 11)
+        text_layers = self.clip.text_model.encoder.layers
+        num_text_layers = len(text_layers)
+        unfreeze_from = num_text_layers - 3
+        
+        for i in range(unfreeze_from, num_text_layers):
+            for param in text_layers[i].parameters():
+                param.requires_grad = True
+        
+        print(f"✓ Text Encoder: Unfrozen layers [{unfreeze_from}-{num_text_layers-1}] (last 3 layers)")
+        
+        # 4. 解冻 Projection 层
         for param in self.clip.visual_projection.parameters():
             param.requires_grad = True
         for param in self.clip.text_projection.parameters():
             param.requires_grad = True
         
-    def forward(self, input_ids, attention_mask, pixel_values):
+        print("✓ Visual Projection: Unfrozen")
+        print("✓ Text Projection: Unfrozen")
+        
+
+        
+    def forward(self, input_ids, attention_mask, pixel_values, text_embs):
         # 获取CLIP的图像和文本特征
         outputs = self.clip(
             input_ids=input_ids,
@@ -161,7 +190,7 @@ class CLIPClassifier(nn.Module):
         text_features = outputs.text_embeds    # [batch, 512]
         
         # 拼接特征
-        combined_features = torch.cat([image_features, text_features], dim=1)
+        combined_features = torch.cat([image_features, text_features, text_embs], dim=1)
         
         # 通过分类头
         logits = self.classifier(combined_features)
@@ -169,28 +198,31 @@ class CLIPClassifier(nn.Module):
         return logits
 
 # ==================== 训练函数 ====================
-def train_epoch(model, dataloader, criterion, optimizer, device):
+def train_epoch(model, dataloader, criterion, optimizer, scheduler, device):
     model.train()
     total_loss = 0
     correct = 0
     total = 0
     
     pbar = tqdm(dataloader, desc='Training')
-    for inputs, labels in pbar:
+    for inputs, text_embs, labels in pbar:
         # 将数据移到设备
         input_ids = inputs['input_ids'].to(device)
         attention_mask = inputs['attention_mask'].to(device)
         pixel_values = inputs['pixel_values'].to(device)
+        text_embs = text_embs.to(device)
         labels = labels.to(device)
         
         # 前向传播
         optimizer.zero_grad()
-        logits = model(input_ids, attention_mask, pixel_values)
+        logits = model(input_ids, attention_mask, pixel_values, text_embs)
         loss = criterion(logits, labels)
         
         # 反向传播
         loss.backward()
         optimizer.step()
+        
+        scheduler.step()
         
         # 统计
         total_loss += loss.item()
@@ -210,13 +242,14 @@ def validate(model, dataloader, criterion, device):
     total = 0
     
     with torch.no_grad():
-        for inputs, labels in tqdm(dataloader, desc='Validating'):
+        for inputs, text_embs, labels in tqdm(dataloader, desc='Validating'):
             input_ids = inputs['input_ids'].to(device)
             attention_mask = inputs['attention_mask'].to(device)
             pixel_values = inputs['pixel_values'].to(device)
+            text_embs = text_embs.to(device)
             labels = labels.to(device)
             
-            logits = model(input_ids, attention_mask, pixel_values)
+            logits = model(input_ids, attention_mask, pixel_values, text_embs)
             loss = criterion(logits, labels)
             
             total_loss += loss.item()
@@ -234,20 +267,32 @@ def main():
     
     # 加载数据
     print("Loading data...")
-    train_df = pd.read_csv(Config.train_csv, dtype=str, keep_default_na=False, quotechar='"', engine="python")
+    train_df_origin = pd.read_csv(Config.train_csv, dtype=str, keep_default_na=False, quotechar='"', engine="python")
     test_df = pd.read_csv(Config.test_csv, dtype=str, keep_default_na=False, quotechar='"', engine="python")
     
-    print(f"Train samples: {len(train_df)}")
+    print(f"Train samples: {len(train_df_origin)}")
     print(f"Test samples: {len(test_df)}")
     
+    print("Loading text embeddings...")
+    train_text_embs_origin = np.load(Config.train_text_emb_file)
+    test_text_embs = np.load(Config.test_text_emb_file)
+    
+    print(f"Text embeddings shape: {train_text_embs_origin.shape}")
+    
     # 划分训练集和验证集
-    train_df, val_df = train_test_split(
-        train_df, 
+    train_indices, val_indices = train_test_split(
+        np.arange(len(train_df_origin)),  # 使用索引而不是 DataFrame
         test_size=Config.val_split, 
         random_state=Config.seed,
-        stratify=train_df['label']
+        stratify=train_df_origin['label']
     )
+    print(len(train_indices), len(val_indices))
+    # 根据索引分割 DataFrame 和 npy
+    train_df = train_df_origin.iloc[train_indices].reset_index(drop=True)
+    val_df = train_df_origin.iloc[val_indices].reset_index(drop=True)
     
+    train_text_embs = train_text_embs_origin[train_indices]
+    val_text_embs = train_text_embs_origin[val_indices]
     print(f"Train: {len(train_df)}, Val: {len(val_df)}")
     
     # 加载CLIP processor
@@ -258,9 +303,9 @@ def main():
     )
     
     # 创建数据集和dataloader
-    train_dataset = ProductDataset(train_df, Config.train_images_dir, processor)
-    val_dataset = ProductDataset(val_df, Config.train_images_dir, processor)
-    test_dataset = ProductDataset(test_df, Config.test_images_dir, processor, is_test=True)
+    train_dataset = ProductDataset(train_df, Config.train_images_dir, train_text_embs, processor)
+    val_dataset = ProductDataset(val_df, Config.train_images_dir, val_text_embs, processor)
+    test_dataset = ProductDataset(test_df, Config.test_images_dir, test_text_embs, processor, is_test=True)
     
     # 创建collate函数的partial版本
     from functools import partial
@@ -309,17 +354,21 @@ def main():
     )
     
     # 学习率调度器
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=Config.num_epochs)
+    total_steps = Config.num_epochs * len(train_loader)   # 总迭代步数
+    warmup_steps = int(total_steps * Config.warm_up)  # 预热步数       
+    scheduler = get_cosine_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=warmup_steps,
+        num_training_steps=total_steps
+    )
     
     # 训练循环
     best_val_acc = 0
     for epoch in range(Config.num_epochs):
         print(f"\nEpoch {epoch+1}/{Config.num_epochs}")
         
-        train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, Config.device)
+        train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, scheduler , Config.device)
         val_loss, val_acc = validate(model, val_loader, criterion, Config.device)
-        
-        scheduler.step()
         
         print(f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%")
         print(f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%")
