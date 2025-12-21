@@ -13,6 +13,7 @@ from sklearn.utils.class_weight import compute_class_weight
 from transformers import get_cosine_schedule_with_warmup
 import torchvision.transforms as transforms
 import random
+from functools import partial
 import re
 import html
 import unicodedata
@@ -189,7 +190,7 @@ def collate_fn(batch, processor, is_test=False):
     else:
         images, texts, labels = zip(*batch)
     
-    # 使用processor处理文本
+    # 使用processor处理文本（只获取input_ids）
     text_inputs = processor(
         text=list(texts),
         padding='max_length',
@@ -198,15 +199,24 @@ def collate_fn(batch, processor, is_test=False):
         return_tensors="pt"
     )
     
+    # SigLIP不需要attention_mask，手动创建
+    input_ids = text_inputs['input_ids']
+    attention_mask = (input_ids != processor.tokenizer.pad_token_id).long()
+    
     # 图像已经通过transforms处理，直接堆叠
     pixel_values = torch.stack(list(images))
     
+    result = {
+        'pixel_values': pixel_values,
+        'input_ids': input_ids,
+        'attention_mask': attention_mask
+    }
+    
     if is_test:
-        return pixel_values, text_inputs, ids
+        return result, ids
     else:
         labels = torch.tensor(labels, dtype=torch.long)
-        print(text_inputs)
-        return pixel_values, text_inputs, labels
+        return result, labels
 
 # ==================== 模型定义 ====================
 class SigLIPClassifier(nn.Module):
@@ -216,6 +226,7 @@ class SigLIPClassifier(nn.Module):
         # 加载预训练SigLIP模型
         print(f"Loading SigLIP model: {model_name}")
         self.siglip = AutoModel.from_pretrained(model_name)
+        # self.siglip.requires_grad_(False) 
         
         # 获取特征维度
         self.embed_dim = self.siglip.config.vision_config.hidden_size
@@ -260,17 +271,17 @@ def train_epoch(model, dataloader, criterion, optimizer, scheduler, device, scal
     total = 0
     
     pbar = tqdm(dataloader, desc='Training')
-    for pixel_values, text_inputs, labels in pbar:
-        pixel_values = pixel_values.to(device)
-        input_ids = text_inputs['input_ids'].to(device)
-        attention_mask = text_inputs['attention_mask'].to(device)
+    for batch, labels in pbar:
+        pixel_values = batch['pixel_values'].to(device)
+        input_ids = batch['input_ids'].to(device)
+        attention_mask = batch['attention_mask'].to(device)
         labels = labels.to(device)
         
         optimizer.zero_grad()
         
         # 混合精度训练
         if scaler is not None:
-            with torch.amp.autocast():
+            with torch.amp.autocast('cuda'):
                 logits = model(pixel_values, input_ids, attention_mask)
                 loss = criterion(logits, labels)
             
@@ -305,10 +316,10 @@ def validate(model, dataloader, criterion, device):
     all_labels = []
     
     with torch.no_grad():
-        for pixel_values, text_inputs, labels in tqdm(dataloader, desc='Validating'):
-            pixel_values = pixel_values.to(device)
-            input_ids = text_inputs['input_ids'].to(device)
-            attention_mask = text_inputs['attention_mask'].to(device)
+        for batch, labels in tqdm(dataloader, desc='Validating'):
+            pixel_values = batch['pixel_values'].to(device)
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
             labels = labels.to(device)
             
             logits = model(pixel_values, input_ids, attention_mask)
@@ -380,7 +391,6 @@ def main():
         )
         
         # 创建dataloader
-        from functools import partial
         train_collate = partial(collate_fn, processor=processor, is_test=False)
         
         train_loader = DataLoader(
@@ -508,6 +518,7 @@ def main():
     
     # 收集所有折的预测结果
     all_fold_logits = []
+    test_ids = []
     
     for fold_idx in range(Config.n_folds):
         print(f"\nPredicting with Fold {fold_idx} model...")
@@ -524,15 +535,13 @@ def main():
         model.load_state_dict(checkpoint['model_state'])
         model.eval()
         
-        # 预测
         fold_logits = []
-        test_ids = []
         
         with torch.no_grad():
-            for pixel_values, text_inputs, batch_ids in tqdm(test_loader, desc=f'Fold {fold_idx}'):
-                pixel_values = pixel_values.to(Config.device)
-                input_ids = text_inputs['input_ids'].to(Config.device)
-                attention_mask = text_inputs['attention_mask'].to(Config.device)
+            for batch, batch_ids in tqdm(test_loader, desc=f'Fold {fold_idx}'):
+                pixel_values = batch['pixel_values'].to(Config.device)
+                input_ids = batch['input_ids'].to(Config.device)
+                attention_mask = batch['attention_mask'].to(Config.device)
                 
                 logits = model(pixel_values, input_ids, attention_mask)
                 fold_logits.append(logits.cpu().numpy())

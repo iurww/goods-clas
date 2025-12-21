@@ -1,23 +1,3 @@
-from transformers import CLIPProcessor, CLIPModel
-
-
-processor = CLIPProcessor.from_pretrained(
-    "./models/clip-vit-base-patch32",
-)
-
-text="""core_object: vehicle power adapter, leather carrying case, hands free earbud  
-functional_features: charges phone battery, prevents overcharging, protects from scratches, allows hands-free calling  
-usage_scenario: cell phone owner on the move  
-"""
-
-inputs = processor(
-    text=[text],
-    return_tensors="pt",
-    padding=True,
-    truncation=True,
-)
-print(inputs['input_ids'].shape)
-
 import pandas as pd
 
 a = pd.read_csv('submission.csv', usecols=['categories']).squeeze()
@@ -35,3 +15,56 @@ out = pd.DataFrame({'id'        : pd.read_csv('submission.csv').id[diff_mask],
                     'pred_old'  : b[diff_mask]})
 print(out['pred_new'].value_counts().sort_index())
 out.to_csv('diff_rows.csv', index=False)
+exit()
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
+from transformers import AutoProcessor, AutoModel
+from PIL import Image, ImageFilter
+import pandas as pd
+import os
+from tqdm import tqdm
+import numpy as np
+from sklearn.model_selection import StratifiedKFold
+from sklearn.utils.class_weight import compute_class_weight
+from transformers import get_cosine_schedule_with_warmup
+import torchvision.transforms as transforms
+import random
+import re
+import html
+import unicodedata
+
+# ==================== 配置参数 ====================
+class Config:
+    # 路径配置
+    train_csv = 'data/compress_train.csv'
+    test_csv = 'data/compress_test.csv'
+    train_images_dir = 'data/train_images/train_images'
+    test_images_dir = 'data/test_images/test_images'
+    submission_file = 'data/submission.csv'
+    
+    model_name = './models/siglip-so400m-patch14-384'
+    
+    num_classes = 21
+    hidden_dim = 1536 
+    dropout = 0.2
+    
+    batch_size = 8
+    eval_batch_size = 16
+    num_epochs = 4
+    learning_rate = 2e-5
+    weight_decay = 0.01
+    warmup_ratio = 0.05
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    seed = 42
+    n_folds = 5
+    
+    max_text_length = 64
+    
+    image_size = 384
+    
+    use_class_weight = False
+    
+    use_fp16 = True
