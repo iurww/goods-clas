@@ -7,14 +7,10 @@ import time
 
 def build_prompt(title, description, max_output_length=80):
     """
-    构建压缩提示词（英文）
-    
-    设计原则:
-    1. 明确任务目标
-    2. 提供类别上下文
-    3. 限制输出长度
-    4. 要求保留关键信息
+    获取答案, 给定title和description,要求模型回答一个id
     """
+    
+    #
     prompt = f"""Task: Extract the most relevant information from product text for classification.
 
 Product Title: {title}
@@ -75,14 +71,14 @@ def evaluate_single_row(client, row, model):
             return {
                 'id': row['id'],
                 'description': row['title'] + row['description'],
-                'label': row['categories'],
+                # 'label': row['categories'],
                 'index': row.name
             }
 
         return {
             'id': row['id'],
             'description': compress,
-            'label': row['categories'],
+            # 'label': row['categories'],
             'index': row.name
         }
     except Exception as e:
@@ -90,7 +86,7 @@ def evaluate_single_row(client, row, model):
         return {
             'id': row['id'],
             'description': -1,
-            'label': row['categories'],
+            # 'label': row['categories'],
             'index': row.name
         }
 
@@ -147,7 +143,7 @@ def evaluate_responses(input_csv, output_csv, api_key, base_url="https://dashsco
                 results.append({
                     'id': row['id'],
                     'description': -1,
-                    'label': row['categories'],
+                    # 'label': row['categories'],
                     'index': row.name
                 })
 
@@ -166,8 +162,8 @@ def evaluate_responses(input_csv, output_csv, api_key, base_url="https://dashsco
 
 if __name__ == "__main__":
 
-    INPUT_FILE = "./data/train.csv"
-    OUTPUT_FILE = "./data/compress_train.csv"
+    INPUT_FILE = "./data/test.csv"
+    OUTPUT_FILE = "./data/compress_test.csv"
 
     API_KEY = "sk-4f4499ad108a440aafa352e6b25b64a6"
 

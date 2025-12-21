@@ -6,29 +6,59 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 
 def build_prompt(title, description, max_output_length=80):
-    """
-    构建压缩提示词（英文）
-    
-    设计原则:
-    1. 明确任务目标
-    2. 提供类别上下文
-    3. 限制输出长度
-    4. 要求保留关键信息
-    """
-    prompt = f"""Task: Extract the most relevant information from product text for classification.
+    prompt = f"""
+You are a product classification feature engineer.
 
-Product Title: {title}
+Your task is NOT to summarize the product.
+Your task is to extract the MOST discriminative keywords and phrases
+that determine the product's TRUE category.
 
-Product Description: {description}
+The final goal is to classify the product into ONE of the following categories:
 
-Instructions:
-1. Extract key information, first convert the title to a concise item name
-2. Remove marketing fluff and promotional language and specific specification parameters
-3. Maximum {max_output_length} words
-4. Output must be concise and informative
+0. Traditional consumer electronics & photography / storage accessories
+1. Outdoor sports & recreation (hunting, fishing, camping, water sports, fitness, cycling, martial arts)
+2. Mobile phone accessories
+3. Automotive parts & accessories
+4. Board games & educational toys
+5. Hardware, building materials & tools
+6. Health & personal care devices
+7. Daily chemical, beauty & personal wash products
+8. Food & beverages
+9. Office & study supplies
+10. Handicraft / art materials & tools
+11. Pet supplies
+12. Outdoor, yard & gardening supplies
+13. Apparel & fashion accessories
+14. Baby durable goods (hardware / non-consumable)
+15. Musical instruments & audio equipment
+16. Daily-use small commodities / general consumables
+17. Baby consumables & care products
+18. Home appliance accessories & consumables
+19. High-end skincare, professional makeup, salon / medical beauty, niche fragrance, adult products
+20. Electronic accessories, smart devices & digital home products
 
-Compressed Text:"""
-        
+Rules:
+- Ignore marketing language, emotions, and vague adjectives.
+- Focus on WHAT the product IS, WHAT it DOES, and WHO it is FOR.
+- Extract features that clearly distinguish this product from similar categories.
+- If something strongly implies electronics, consumables, baby use, pet use, or vehicles, it MUST be reflected.
+
+Output format (strictly follow this structure):
+
+core_object: <1-3 noun phrases>
+functional_features: <comma-separated key technical or functional terms>
+usage_scenario: <main usage context or target user>
+category_signal_keywords: <keywords that strongly indicate the correct category>
+
+Limit the entire output to {max_output_length} tokens.
+Do NOT include explanations or full sentences.
+
+Product title:
+{title}
+
+Product description:
+{description}
+"""
     return prompt
 
 def call_llm_api(client, prompt, model="qwen-plus", max_retries=3):
@@ -75,14 +105,14 @@ def evaluate_single_row(client, row, model):
             return {
                 'id': row['id'],
                 'description': row['title'] + row['description'],
-                'label': row['categories'],
+                # 'categories': row['categories'],
                 'index': row.name
             }
 
         return {
             'id': row['id'],
             'description': compress,
-            'label': row['categories'],
+            # 'categories': row['categories'],
             'index': row.name
         }
     except Exception as e:
@@ -90,7 +120,7 @@ def evaluate_single_row(client, row, model):
         return {
             'id': row['id'],
             'description': -1,
-            'label': row['categories'],
+            # 'categories': row['categories'],
             'index': row.name
         }
 
@@ -147,7 +177,7 @@ def evaluate_responses(input_csv, output_csv, api_key, base_url="https://dashsco
                 results.append({
                     'id': row['id'],
                     'description': -1,
-                    'label': row['categories'],
+                    # 'categories': row['categories'],
                     'index': row.name
                 })
 
@@ -166,8 +196,8 @@ def evaluate_responses(input_csv, output_csv, api_key, base_url="https://dashsco
 
 if __name__ == "__main__":
 
-    INPUT_FILE = "./data/train.csv"
-    OUTPUT_FILE = "./data/compress_train.csv"
+    INPUT_FILE = "./data/test.csv"
+    OUTPUT_FILE = "./data/compress_test.csv"
 
     API_KEY = "sk-4f4499ad108a440aafa352e6b25b64a6"
 
@@ -193,7 +223,7 @@ if __name__ == "__main__":
         api_key=API_KEY,
         base_url=BASE_URL,
         model=MODEL,
-        max_workers=20  # 可以根据API限流情况调整，建议10-20
+        max_workers=40  # 可以根据API限流情况调整，建议10-20
     )
 
     print("\n前10条结果:")

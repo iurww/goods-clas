@@ -15,8 +15,8 @@ class Config:
     # 路径配置
     train_csv = 'data/compress_train.csv'
     test_csv = 'data/compress_test.csv'
-    train_images_dir = 'data/train_images'
-    test_images_dir = 'data/test_images'
+    train_images_dir = 'data/train_images/train_images'
+    test_images_dir = 'data/test_images/test_images'
     submission_file = 'data/submission.csv'
     
     train_text_emb_file = 'data/qwen3_train_text_embs.npy'
@@ -28,14 +28,14 @@ class Config:
     # clip_model_name = './models/clip-vit-large-patch14'
    
     num_classes = 21
-    hidden_dims = [1024, 512]  # MLP隐藏层维度
+    hidden_dims = [2048, 1024]  # MLP隐藏层维度
     dropout = 0.3
     
     # 训练配置
     batch_size = 64
     num_epochs = 10
-    learning_rate = 3e-5
-    weight_decay = 1e-3
+    learning_rate = 2e-5
+    weight_decay = 1e-2
     warm_up = 0.1
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     seed = 43
@@ -63,9 +63,11 @@ class ProductDataset(Dataset):
         image_path = os.path.join(self.image_dir, f"{row['id']}.jpg")
         try:
             image = Image.open(image_path).convert('RGB')
+            # image = Image.new('RGB', (224, 224), color='white')
             image = image.resize((224, 224))
         except:
             # 如果图像加载失败，创建一个空白图像
+            print(f"Warning: Failed to load image {image_path}. Using blank image instead." )
             image = Image.new('RGB', (224, 224), color='white')
         
         # 合并文本：title + description
@@ -74,7 +76,7 @@ class ProductDataset(Dataset):
         text_emb = self.text_emb[idx]
         
         if not self.is_test:
-            label = int(row['label'])
+            label = int(row['categories'])
             return image, text, text_emb, label
         else:
             return image, text, text_emb, row['id']
@@ -96,6 +98,8 @@ def collate_fn(batch, processor, is_test=False):
         truncation=True,
         max_length=Config.max_text_length
     )
+    print(inputs['pixel_values'].shape, inputs['input_ids'].shape, inputs['attention_mask'].shape)
+    exit()
     text_embs = torch.tensor(np.array(text_embs), dtype=torch.float32)
     
     if is_test:
@@ -112,9 +116,8 @@ class CLIPClassifier(nn.Module):
         # 加载预训练CLIP模型（只下载PyTorch版本）
         self.clip = CLIPModel.from_pretrained(
             clip_model_name,
-            ignore_mismatched_sizes=True
         )
-        print(self.clip)
+        # print(self.clip)
         
         self._freeze_clip_layers()
         # 获取CLIP特征维度
@@ -122,7 +125,7 @@ class CLIPClassifier(nn.Module):
         
         # 构建MLP分类头
         layers = []
-        input_dim = clip_dim * 2 + 2560  # 图像特征 + 文本特征
+        input_dim = clip_dim * 2 # 图像特征 + 文本特征
         
         for hidden_dim in hidden_dims:
             layers.append(nn.Linear(input_dim, hidden_dim))
@@ -147,7 +150,7 @@ class CLIPClassifier(nn.Module):
         # 2. 解冻 Vision Encoder 最后3层 (layers 9, 10, 11)
         vision_layers = self.clip.vision_model.encoder.layers
         num_vision_layers = len(vision_layers)
-        unfreeze_from = num_vision_layers - 3  # 从第9层开始
+        unfreeze_from = num_vision_layers - 2  # 从第9层开始
         
         for i in range(unfreeze_from, num_vision_layers):
             for param in vision_layers[i].parameters():
@@ -158,7 +161,7 @@ class CLIPClassifier(nn.Module):
         # 3. 解冻 Text Encoder 最后3层 (layers 9, 10, 11)
         text_layers = self.clip.text_model.encoder.layers
         num_text_layers = len(text_layers)
-        unfreeze_from = num_text_layers - 3
+        unfreeze_from = num_text_layers - 2
         
         for i in range(unfreeze_from, num_text_layers):
             for param in text_layers[i].parameters():
@@ -190,7 +193,8 @@ class CLIPClassifier(nn.Module):
         text_features = outputs.text_embeds    # [batch, 512]
         
         # 拼接特征
-        combined_features = torch.cat([image_features, text_features, text_embs], dim=1)
+        combined_features = torch.cat([image_features, text_features], dim=1)
+        # combined_features = text_features
         
         # 通过分类头
         logits = self.classifier(combined_features)
@@ -284,7 +288,7 @@ def main():
         np.arange(len(train_df_origin)),  # 使用索引而不是 DataFrame
         test_size=Config.val_split, 
         random_state=Config.seed,
-        stratify=train_df_origin['label']
+        stratify=train_df_origin['categories']  # 分层抽样
     )
     print(len(train_indices), len(val_indices))
     # 根据索引分割 DataFrame 和 npy
@@ -299,7 +303,6 @@ def main():
     print(f"Loading CLIP model: {Config.clip_model_name}")
     processor = CLIPProcessor.from_pretrained(
         Config.clip_model_name,
-        ignore_mismatched_sizes=True  # 忽略大小不匹配
     )
     
     # 创建数据集和dataloader
@@ -376,12 +379,12 @@ def main():
         # 保存最佳模型
         if val_acc > best_val_acc:
             best_val_acc = val_acc
-            torch.save(model.state_dict(), 'best_model.pth')
+            torch.save(model.state_dict(), f'best_model{best_val_acc:.2f}.pth')
             print(f"✓ Best model saved! Val Acc: {val_acc:.2f}%")
     
     # 加载最佳模型进行预测
     print("\nLoading best model for inference...")
-    model.load_state_dict(torch.load('best_model.pth'))
+    model.load_state_dict(torch.load(f'best_model{best_val_acc:.2f}.pth'))
     model.eval()
     
     # 预测测试集
@@ -390,12 +393,13 @@ def main():
     ids = []
     
     with torch.no_grad():
-        for inputs, batch_ids in tqdm(test_loader, desc='Predicting'):
+        for inputs,text_embs, batch_ids in tqdm(test_loader, desc='Predicting'):
             input_ids = inputs['input_ids'].to(Config.device)
             attention_mask = inputs['attention_mask'].to(Config.device)
             pixel_values = inputs['pixel_values'].to(Config.device)
+            text_embs = text_embs.to(Config.device)
             
-            logits = model(input_ids, attention_mask, pixel_values)
+            logits = model(input_ids, attention_mask, pixel_values, text_embs)
             preds = logits.argmax(dim=1).cpu().numpy()
             
             predictions.extend(preds)
