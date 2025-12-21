@@ -16,7 +16,7 @@ BATCH_SIZE = 16
 EPOCHS = 10
 LR = 2e-5
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-SAVE_PATH = "best_model.pt"
+SAVE_PATH = "deberta_best_model.pt"
 
 # ========== 数据集 ==========
 class TextDataset(Dataset):
@@ -55,7 +55,7 @@ num_classes = len(le.classes_)
 print(f"{num_classes} ✓ 类别数量")
 
 # 划分训练集和验证集
-train_data, val_data = train_test_split(train_df, test_size=0.15, random_state=42, stratify=train_df['labels'])
+train_data, val_data = train_test_split(train_df, test_size=0.05, random_state=42, stratify=train_df['labels'])
 print(f"训练集: {len(train_data)}, 验证集: {len(val_data)}")
 
 # 初始化

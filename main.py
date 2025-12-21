@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from transformers import CLIPProcessor, CLIPModel
 from PIL import Image
@@ -98,8 +99,6 @@ def collate_fn(batch, processor, is_test=False):
         truncation=True,
         max_length=Config.max_text_length
     )
-    print(inputs['pixel_values'].shape, inputs['input_ids'].shape, inputs['attention_mask'].shape)
-    exit()
     text_embs = torch.tensor(np.array(text_embs), dtype=torch.float32)
     
     if is_test:
@@ -150,7 +149,7 @@ class CLIPClassifier(nn.Module):
         # 2. 解冻 Vision Encoder 最后3层 (layers 9, 10, 11)
         vision_layers = self.clip.vision_model.encoder.layers
         num_vision_layers = len(vision_layers)
-        unfreeze_from = num_vision_layers - 2  # 从第9层开始
+        unfreeze_from = num_vision_layers - 6  # 从第9层开始
         
         for i in range(unfreeze_from, num_vision_layers):
             for param in vision_layers[i].parameters():
@@ -192,8 +191,9 @@ class CLIPClassifier(nn.Module):
         image_features = outputs.image_embeds  # [batch, 512]
         text_features = outputs.text_embeds    # [batch, 512]
         
-        # 拼接特征
+        # 拼接特征 norm
         combined_features = torch.cat([image_features, text_features], dim=1)
+        combined_features = F.normalize(combined_features, p=2, dim=1)  # 可选
         # combined_features = text_features
         
         # 通过分类头
