@@ -2,14 +2,20 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
-from transformers import CLIPProcessor, CLIPModel
-from PIL import Image
+from transformers import AutoProcessor, AutoModel
+from PIL import Image, ImageFilter
 import pandas as pd
 import os
 from tqdm import tqdm
 import numpy as np
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold
+from sklearn.utils.class_weight import compute_class_weight
 from transformers import get_cosine_schedule_with_warmup
+import torchvision.transforms as transforms
+import random
+import re
+import html
+import unicodedata
 
 # ==================== 配置参数 ====================
 class Config:
@@ -20,38 +26,130 @@ class Config:
     test_images_dir = 'data/test_images/test_images'
     submission_file = 'data/submission.csv'
     
-    train_text_emb_file = 'data/qwen3_train_text_embs.npy'
-    test_text_emb_file = 'data/qwen3_test_text_embs.npy'
+    # 模型配置 - 使用SigLIP模型
+    model_name = './models/siglip-so400m-patch14-384'
     
-    # 模型配置
-    # 在线模式（需要网络）
-    clip_model_name = './models/clip-vit-base-patch32'  # 可选: clip-vit-large-patch14
-    # clip_model_name = './models/clip-vit-large-patch14'
-   
     num_classes = 21
-    hidden_dims = [2048, 1024]  # MLP隐藏层维度
-    dropout = 0.3
+    hidden_dim = 1536  # 分类头隐藏层维度
+    dropout = 0.2
     
     # 训练配置
-    batch_size = 64
-    num_epochs = 10
+    batch_size = 8
+    eval_batch_size = 16
+    num_epochs = 5
     learning_rate = 2e-5
-    weight_decay = 1e-2
-    warm_up = 0.1
+    weight_decay = 0.01
+    warmup_ratio = 0.05
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    seed = 43
-    val_split = 0.1
+    seed = 42
+    n_folds = 5
     
-    # 其他
-    max_text_length = 77  # CLIP默认最大长度
+    # SigLIP文本最大长度上限
+    max_text_length = 64
+    
+    # 图像配置
+    image_size = 384
+    
+    # 是否使用类别权重
+    use_class_weight = False
+    
+    # 混合精度训练
+    use_fp16 = True
+
+# ==================== 文本清洗函数 ====================
+def clean_text(text):
+    """高级文本清洗流程"""
+    if pd.isna(text) or text == '':
+        return ''
+    
+    # Unicode规范化 (NFKC形式)
+    text = unicodedata.normalize('NFKC', str(text))
+    
+    # HTML实体解码
+    text = html.unescape(text)
+    
+    # 移除HTML标签
+    text = re.sub(r'<[^>]+>', ' ', text)
+    
+    # 移除URL链接
+    text = re.sub(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', ' ', text)
+    
+    # 空白字符规整
+    text = re.sub(r'\s+', ' ', text)
+    text = text.strip()
+    
+    return text
+
+# ==================== 数据增强变换 ====================
+class GaussianBlur:
+    """高斯模糊增强"""
+    def __init__(self, p=0.2):
+        self.p = p
+    
+    def __call__(self, img):
+        if random.random() < self.p:
+            radius = random.uniform(0.1, 2.0)
+            return img.filter(ImageFilter.GaussianBlur(radius))
+        return img
+
+class JPEGCompression:
+    """JPEG压缩伪影模拟"""
+    def __init__(self, p=0.2):
+        self.p = p
+    
+    def __call__(self, img):
+        if random.random() < self.p:
+            from io import BytesIO
+            quality = random.randint(60, 95)
+            buffer = BytesIO()
+            img.save(buffer, format='JPEG', quality=quality)
+            buffer.seek(0)
+            return Image.open(buffer).convert('RGB')
+        return img
+
+def get_train_transforms(image_size=384):
+    """训练阶段数据增强"""
+    return transforms.Compose([
+        transforms.RandomResizedCrop(
+            image_size, 
+            scale=(0.7, 1.0), 
+            ratio=(0.75, 1.33)
+        ),
+        transforms.RandomHorizontalFlip(p=0.5),
+        transforms.ColorJitter(
+            brightness=0.2,
+            contrast=0.2,
+            saturation=0.2,
+            hue=0.1
+        ),
+        GaussianBlur(p=0.2),
+        JPEGCompression(p=0.2),
+        transforms.ToTensor(),
+        transforms.Normalize(
+            mean=[0.5, 0.5, 0.5],
+            std=[0.5, 0.5, 0.5]
+        )
+    ])
+
+def get_val_transforms(image_size=384):
+    """验证/测试阶段确定性变换"""
+    return transforms.Compose([
+        transforms.Resize(400),
+        transforms.CenterCrop(image_size),
+        transforms.ToTensor(),
+        transforms.Normalize(
+            mean=[0.5, 0.5, 0.5],
+            std=[0.5, 0.5, 0.5]
+        )
+    ])
 
 # ==================== 数据集类 ====================
 class ProductDataset(Dataset):
-    def __init__(self, df, image_dir, text_emb, processor, is_test=False):
+    def __init__(self, df, image_dir, processor, transform=None, is_test=False):
         self.df = df.reset_index(drop=True)
         self.image_dir = image_dir
-        self.text_emb = torch.tensor(text_emb, dtype=torch.float32)
         self.processor = processor
+        self.transform = transform
         self.is_test = is_test
         
     def __len__(self):
@@ -64,167 +162,126 @@ class ProductDataset(Dataset):
         image_path = os.path.join(self.image_dir, f"{row['id']}.jpg")
         try:
             image = Image.open(image_path).convert('RGB')
-            # image = Image.new('RGB', (224, 224), color='white')
-            image = image.resize((224, 224))
         except:
-            # 如果图像加载失败，创建一个空白图像
-            print(f"Warning: Failed to load image {image_path}. Using blank image instead." )
-            image = Image.new('RGB', (224, 224), color='white')
+            print(f"Warning: Failed to load image {image_path}. Using blank image.")
+            image = Image.new('RGB', (Config.image_size, Config.image_size), color='white')
         
-        # 合并文本：title + description
-        text = f"{row['description']}"
+        # 应用图像变换
+        if self.transform:
+            image = self.transform(image)
         
-        text_emb = self.text_emb[idx]
+        # 文本清洗和拼接
+        title = clean_text(row.get('title', ''))
+        description = clean_text(row.get('description', ''))
+        text = f"{title} {description}".strip()
         
         if not self.is_test:
             label = int(row['categories'])
-            return image, text, text_emb, label
+            return image, text, label
         else:
-            return image, text, text_emb, row['id']
+            return image, text, row['id']
 
 # ==================== 自定义collate函数 ====================
 def collate_fn(batch, processor, is_test=False):
-    """自定义batch整理函数"""
+    """批次整理函数"""
     if is_test:
-        images, texts, text_embs, ids = zip(*batch)
+        images, texts, ids = zip(*batch)
     else:
-        images, texts, text_embs, labels = zip(*batch)
+        images, texts, labels = zip(*batch)
     
-    # 使用processor批量处理
-    inputs = processor(
+    # 使用processor处理文本
+    text_inputs = processor(
         text=list(texts),
-        images=list(images),
-        return_tensors="pt",
-        padding=True,
+        padding='max_length',
         truncation=True,
-        max_length=Config.max_text_length
+        max_length=Config.max_text_length,
+        return_tensors="pt"
     )
-    text_embs = torch.tensor(np.array(text_embs), dtype=torch.float32)
+    
+    # 图像已经通过transforms处理，直接堆叠
+    pixel_values = torch.stack(list(images))
     
     if is_test:
-        return inputs, text_embs, ids
+        return pixel_values, text_inputs, ids
     else:
         labels = torch.tensor(labels, dtype=torch.long)
-        return inputs, text_embs, labels
+        print(text_inputs)
+        return pixel_values, text_inputs, labels
 
 # ==================== 模型定义 ====================
-class CLIPClassifier(nn.Module):
-    def __init__(self, clip_model_name, num_classes, hidden_dims, dropout):
-        super(CLIPClassifier, self).__init__()
+class SigLIPClassifier(nn.Module):
+    def __init__(self, model_name, num_classes, hidden_dim, dropout):
+        super(SigLIPClassifier, self).__init__()
         
-        # 加载预训练CLIP模型（只下载PyTorch版本）
-        self.clip = CLIPModel.from_pretrained(
-            clip_model_name,
+        # 加载预训练SigLIP模型
+        print(f"Loading SigLIP model: {model_name}")
+        self.siglip = AutoModel.from_pretrained(model_name)
+        
+        # 获取特征维度
+        self.embed_dim = self.siglip.config.vision_config.hidden_size
+        
+        # 构建分类头: 拼接后的特征 -> LayerNorm -> MLP
+        self.fusion = nn.Sequential(
+            nn.LayerNorm(self.embed_dim * 2),
+            nn.Linear(self.embed_dim * 2, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, num_classes)
         )
-        # print(self.clip)
         
-        self._freeze_clip_layers()
-        # 获取CLIP特征维度
-        clip_dim = self.clip.config.projection_dim  # 通常是512
-        
-        # 构建MLP分类头
-        layers = []
-        input_dim = clip_dim * 2 # 图像特征 + 文本特征
-        
-        for hidden_dim in hidden_dims:
-            layers.append(nn.Linear(input_dim, hidden_dim))
-            layers.append(nn.ReLU())
-            layers.append(nn.Dropout(dropout))
-            input_dim = hidden_dim
-        
-        layers.append(nn.Linear(input_dim, num_classes))
-        
-        self.classifier = nn.Sequential(*layers)
+        print(f"Model loaded. Embed dim: {self.embed_dim}")
+        print(f"Trainable parameters: {sum(p.numel() for p in self.parameters() if p.requires_grad):,}")
     
-    def _freeze_clip_layers(self):
-        """冻结CLIP,只保留最后3层可训练"""
-        print("\n" + "="*60)
-        print("Setting up CLIP layers...")
-        print("="*60)
-        
-        # 1. 先冻结所有参数
-        for param in self.clip.parameters():
-            param.requires_grad = False
-        
-        # 2. 解冻 Vision Encoder 最后3层 (layers 9, 10, 11)
-        vision_layers = self.clip.vision_model.encoder.layers
-        num_vision_layers = len(vision_layers)
-        unfreeze_from = num_vision_layers - 6  # 从第9层开始
-        
-        for i in range(unfreeze_from, num_vision_layers):
-            for param in vision_layers[i].parameters():
-                param.requires_grad = True
-        
-        print(f"✓ Vision Encoder: Unfrozen layers [{unfreeze_from}-{num_vision_layers-1}] (last 3 layers)")
-        
-        # 3. 解冻 Text Encoder 最后3层 (layers 9, 10, 11)
-        text_layers = self.clip.text_model.encoder.layers
-        num_text_layers = len(text_layers)
-        unfreeze_from = num_text_layers - 2
-        
-        for i in range(unfreeze_from, num_text_layers):
-            for param in text_layers[i].parameters():
-                param.requires_grad = True
-        
-        print(f"✓ Text Encoder: Unfrozen layers [{unfreeze_from}-{num_text_layers-1}] (last 3 layers)")
-        
-        # 4. 解冻 Projection 层
-        for param in self.clip.visual_projection.parameters():
-            param.requires_grad = True
-        for param in self.clip.text_projection.parameters():
-            param.requires_grad = True
-        
-        print("✓ Visual Projection: Unfrozen")
-        print("✓ Text Projection: Unfrozen")
-        
-
-        
-    def forward(self, input_ids, attention_mask, pixel_values, text_embs):
-        # 获取CLIP的图像和文本特征
-        outputs = self.clip(
+    def forward(self, pixel_values, input_ids, attention_mask):
+        # 获取SigLIP的图像和文本嵌入
+        outputs = self.siglip(
+            pixel_values=pixel_values,
             input_ids=input_ids,
-            attention_mask=attention_mask,
-            pixel_values=pixel_values
+            attention_mask=attention_mask
         )
         
-        # 提取归一化后的特征
-        image_features = outputs.image_embeds  # [batch, 512]
-        text_features = outputs.text_embeds    # [batch, 512]
+        # 提取嵌入特征
+        image_embeds = outputs.image_embeds  # [batch, embed_dim]
+        text_embeds = outputs.text_embeds    # [batch, embed_dim]
         
-        # 拼接特征 norm
-        combined_features = torch.cat([image_features, text_features], dim=1)
-        combined_features = F.normalize(combined_features, p=2, dim=1)  # 可选
-        # combined_features = text_features
+        # 拼接特征
+        combined = torch.cat([image_embeds, text_embeds], dim=1)
         
         # 通过分类头
-        logits = self.classifier(combined_features)
+        logits = self.fusion(combined)
         
         return logits
 
 # ==================== 训练函数 ====================
-def train_epoch(model, dataloader, criterion, optimizer, scheduler, device):
+def train_epoch(model, dataloader, criterion, optimizer, scheduler, device, scaler=None):
     model.train()
     total_loss = 0
     correct = 0
     total = 0
     
     pbar = tqdm(dataloader, desc='Training')
-    for inputs, text_embs, labels in pbar:
-        # 将数据移到设备
-        input_ids = inputs['input_ids'].to(device)
-        attention_mask = inputs['attention_mask'].to(device)
-        pixel_values = inputs['pixel_values'].to(device)
-        text_embs = text_embs.to(device)
+    for pixel_values, text_inputs, labels in pbar:
+        pixel_values = pixel_values.to(device)
+        input_ids = text_inputs['input_ids'].to(device)
+        attention_mask = text_inputs['attention_mask'].to(device)
         labels = labels.to(device)
         
-        # 前向传播
         optimizer.zero_grad()
-        logits = model(input_ids, attention_mask, pixel_values, text_embs)
-        loss = criterion(logits, labels)
         
-        # 反向传播
-        loss.backward()
-        optimizer.step()
+        # 混合精度训练
+        if scaler is not None:
+            with torch.amp.autocast():
+                logits = model(pixel_values, input_ids, attention_mask)
+                loss = criterion(logits, labels)
+            
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            logits = model(pixel_values, input_ids, attention_mask)
+            loss = criterion(logits, labels)
+            loss.backward()
+            optimizer.step()
         
         scheduler.step()
         
@@ -234,7 +291,7 @@ def train_epoch(model, dataloader, criterion, optimizer, scheduler, device):
         total += labels.size(0)
         correct += predicted.eq(labels).sum().item()
         
-        pbar.set_postfix({'loss': loss.item(), 'acc': 100.*correct/total})
+        pbar.set_postfix({'loss': f'{loss.item():.4f}', 'acc': f'{100.*correct/total:.2f}%'})
     
     return total_loss / len(dataloader), 100. * correct / total
 
@@ -244,175 +301,265 @@ def validate(model, dataloader, criterion, device):
     total_loss = 0
     correct = 0
     total = 0
+    all_preds = []
+    all_labels = []
     
     with torch.no_grad():
-        for inputs, text_embs, labels in tqdm(dataloader, desc='Validating'):
-            input_ids = inputs['input_ids'].to(device)
-            attention_mask = inputs['attention_mask'].to(device)
-            pixel_values = inputs['pixel_values'].to(device)
-            text_embs = text_embs.to(device)
+        for pixel_values, text_inputs, labels in tqdm(dataloader, desc='Validating'):
+            pixel_values = pixel_values.to(device)
+            input_ids = text_inputs['input_ids'].to(device)
+            attention_mask = text_inputs['attention_mask'].to(device)
             labels = labels.to(device)
             
-            logits = model(input_ids, attention_mask, pixel_values, text_embs)
+            logits = model(pixel_values, input_ids, attention_mask)
             loss = criterion(logits, labels)
             
             total_loss += loss.item()
             _, predicted = logits.max(1)
             total += labels.size(0)
             correct += predicted.eq(labels).sum().item()
+            
+            all_preds.extend(predicted.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
     
-    return total_loss / len(dataloader), 100. * correct / total
+    # 计算Macro-F1
+    from sklearn.metrics import f1_score
+    macro_f1 = f1_score(all_labels, all_preds, average='macro') * 100
+    
+    return total_loss / len(dataloader), 100. * correct / total, macro_f1
 
 # ==================== 主函数 ====================
 def main():
     # 设置随机种子
     torch.manual_seed(Config.seed)
     np.random.seed(Config.seed)
+    random.seed(Config.seed)
     
     # 加载数据
     print("Loading data...")
-    train_df_origin = pd.read_csv(Config.train_csv, dtype=str, keep_default_na=False, quotechar='"', engine="python")
+    train_df = pd.read_csv(Config.train_csv, dtype=str, keep_default_na=False, quotechar='"', engine="python")
     test_df = pd.read_csv(Config.test_csv, dtype=str, keep_default_na=False, quotechar='"', engine="python")
     
-    print(f"Train samples: {len(train_df_origin)}")
+    print(f"Train samples: {len(train_df)}")
     print(f"Test samples: {len(test_df)}")
     
-    print("Loading text embeddings...")
-    train_text_embs_origin = np.load(Config.train_text_emb_file)
-    test_text_embs = np.load(Config.test_text_emb_file)
+    # 加载processor
+    print(f"Loading SigLIP processor...")
+    processor = AutoProcessor.from_pretrained(Config.model_name)
     
-    print(f"Text embeddings shape: {train_text_embs_origin.shape}")
+    # 分层K折交叉验证
+    skf = StratifiedKFold(n_splits=Config.n_folds, shuffle=True, random_state=Config.seed)
     
-    # 划分训练集和验证集
-    train_indices, val_indices = train_test_split(
-        np.arange(len(train_df_origin)),  # 使用索引而不是 DataFrame
-        test_size=Config.val_split, 
-        random_state=Config.seed,
-        stratify=train_df_origin['categories']  # 分层抽样
+    # 存储所有折的最佳指标
+    fold_results = []
+    
+    # 训练所有折
+    for fold_idx, (train_indices, val_indices) in enumerate(skf.split(train_df, train_df['categories'])):
+        print(f"\n{'='*60}")
+        print(f"Training Fold {fold_idx + 1}/{Config.n_folds}")
+        print(f"{'='*60}")
+        
+        # 划分数据
+        train_fold_df = train_df.iloc[train_indices].reset_index(drop=True)
+        val_fold_df = train_df.iloc[val_indices].reset_index(drop=True)
+        
+        print(f"Train: {len(train_fold_df)}, Val: {len(val_fold_df)}")
+        
+        # 创建数据集
+        train_dataset = ProductDataset(
+            train_fold_df, 
+            Config.train_images_dir, 
+            processor,
+            transform=get_train_transforms(Config.image_size)
+        )
+        val_dataset = ProductDataset(
+            val_fold_df, 
+            Config.train_images_dir, 
+            processor,
+            transform=get_val_transforms(Config.image_size)
+        )
+        
+        # 创建dataloader
+        from functools import partial
+        train_collate = partial(collate_fn, processor=processor, is_test=False)
+        
+        train_loader = DataLoader(
+            train_dataset, 
+            batch_size=Config.batch_size, 
+            shuffle=True, 
+            num_workers=4,
+            collate_fn=train_collate,
+            pin_memory=True
+        )
+        val_loader = DataLoader(
+            val_dataset, 
+            batch_size=Config.eval_batch_size, 
+            shuffle=False, 
+            num_workers=4,
+            collate_fn=train_collate,
+            pin_memory=True
+        )
+        
+        # 创建模型
+        print("Creating model...")
+        model = SigLIPClassifier(
+            Config.model_name,
+            Config.num_classes,
+            Config.hidden_dim,
+            Config.dropout
+        ).to(Config.device)
+        
+        # 计算类别权重
+        class_weights = None
+        if Config.use_class_weight:
+            labels = train_fold_df['categories'].astype(int).values
+            class_weights = compute_class_weight('balanced', classes=np.unique(labels), y=labels)
+            class_weights = torch.FloatTensor(class_weights).to(Config.device)
+            print(f"Using class weights: {class_weights}")
+        
+        # 定义损失函数和优化器
+        criterion = nn.CrossEntropyLoss(weight=class_weights)
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=Config.learning_rate,
+            weight_decay=Config.weight_decay
+        )
+        
+        # 学习率调度器
+        total_steps = Config.num_epochs * len(train_loader)
+        warmup_steps = int(total_steps * Config.warmup_ratio)
+        scheduler = get_cosine_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=warmup_steps,
+            num_training_steps=total_steps
+        )
+        
+        # 混合精度训练
+        scaler = torch.amp.GradScaler() if Config.use_fp16 else None
+        
+        # 训练循环
+        best_macro_f1 = 0
+        for epoch in range(Config.num_epochs):
+            print(f"\nEpoch {epoch+1}/{Config.num_epochs}")
+            
+            train_loss, train_acc = train_epoch(
+                model, train_loader, criterion, optimizer, scheduler, Config.device, scaler
+            )
+            val_loss, val_acc, val_macro_f1 = validate(model, val_loader, criterion, Config.device)
+            
+            print(f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%")
+            print(f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%, Val Macro-F1: {val_macro_f1:.2f}%")
+            
+            # 保存最佳模型
+            if val_macro_f1 > best_macro_f1:
+                best_macro_f1 = val_macro_f1
+                torch.save({
+                    'model_state': model.state_dict(),
+                    'epoch': epoch,
+                    'val_loss': val_loss,
+                    'val_acc': val_acc,
+                    'val_macro_f1': val_macro_f1
+                }, f'best_model_fold{fold_idx}.pth')
+                print(f"✓ Best model saved! Val Macro-F1: {val_macro_f1:.2f}%")
+        
+        print(f"\nBest Val Macro-F1 for Fold {fold_idx}: {best_macro_f1:.2f}%")
+        fold_results.append({
+            'fold': fold_idx,
+            'best_macro_f1': best_macro_f1
+        })
+        
+        # 释放内存
+        del model, optimizer, scheduler, train_loader, val_loader
+        torch.cuda.empty_cache()
+    
+    # 打印所有折的汇总结果
+    print("\n" + "="*60)
+    print("Cross-Validation Results Summary")
+    print("="*60)
+    for result in fold_results:
+        print(f"Fold {result['fold']}: Macro-F1 = {result['best_macro_f1']:.2f}%")
+    avg_macro_f1 = np.mean([r['best_macro_f1'] for r in fold_results])
+    std_macro_f1 = np.std([r['best_macro_f1'] for r in fold_results])
+    print(f"\nAverage Macro-F1: {avg_macro_f1:.2f}% ± {std_macro_f1:.2f}%")
+    print("="*60)
+    
+    # 推理：使用所有折模型进行集成预测
+    print("\n" + "="*60)
+    print("Ensemble Inference on Test Set")
+    print("="*60)
+    
+    # 创建测试数据集
+    test_dataset = ProductDataset(
+        test_df, 
+        Config.test_images_dir, 
+        processor,
+        transform=get_val_transforms(Config.image_size),
+        is_test=True
     )
-    print(len(train_indices), len(val_indices))
-    # 根据索引分割 DataFrame 和 npy
-    train_df = train_df_origin.iloc[train_indices].reset_index(drop=True)
-    val_df = train_df_origin.iloc[val_indices].reset_index(drop=True)
     
-    train_text_embs = train_text_embs_origin[train_indices]
-    val_text_embs = train_text_embs_origin[val_indices]
-    print(f"Train: {len(train_df)}, Val: {len(val_df)}")
-    
-    # 加载CLIP processor
-    print(f"Loading CLIP model: {Config.clip_model_name}")
-    processor = CLIPProcessor.from_pretrained(
-        Config.clip_model_name,
-    )
-    
-    # 创建数据集和dataloader
-    train_dataset = ProductDataset(train_df, Config.train_images_dir, train_text_embs, processor)
-    val_dataset = ProductDataset(val_df, Config.train_images_dir, val_text_embs, processor)
-    test_dataset = ProductDataset(test_df, Config.test_images_dir, test_text_embs, processor, is_test=True)
-    
-    # 创建collate函数的partial版本
-    from functools import partial
-    train_collate = partial(collate_fn, processor=processor, is_test=False)
     test_collate = partial(collate_fn, processor=processor, is_test=True)
-    
-    train_loader = DataLoader(
-        train_dataset, 
-        batch_size=Config.batch_size, 
-        shuffle=True, 
-        num_workers=4,
-        collate_fn=train_collate
-    )
-    val_loader = DataLoader(
-        val_dataset, 
-        batch_size=Config.batch_size, 
-        shuffle=False, 
-        num_workers=4,
-        collate_fn=train_collate
-    )
     test_loader = DataLoader(
         test_dataset, 
-        batch_size=Config.batch_size, 
+        batch_size=Config.eval_batch_size, 
         shuffle=False, 
         num_workers=4,
         collate_fn=test_collate
     )
     
-    # 创建模型
-    print("Creating model...")
-    model = CLIPClassifier(
-        Config.clip_model_name,
-        Config.num_classes,
-        Config.hidden_dims,
-        Config.dropout
-    ).to(Config.device)
+    # 收集所有折的预测结果
+    all_fold_logits = []
     
-    print(f"Model parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
-    
-    # 定义损失函数和优化器
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=Config.learning_rate,
-        weight_decay=Config.weight_decay
-    )
-    
-    # 学习率调度器
-    total_steps = Config.num_epochs * len(train_loader)   # 总迭代步数
-    warmup_steps = int(total_steps * Config.warm_up)  # 预热步数       
-    scheduler = get_cosine_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=warmup_steps,
-        num_training_steps=total_steps
-    )
-    
-    # 训练循环
-    best_val_acc = 0
-    for epoch in range(Config.num_epochs):
-        print(f"\nEpoch {epoch+1}/{Config.num_epochs}")
+    for fold_idx in range(Config.n_folds):
+        print(f"\nPredicting with Fold {fold_idx} model...")
         
-        train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, scheduler , Config.device)
-        val_loss, val_acc = validate(model, val_loader, criterion, Config.device)
+        # 加载该折的最佳模型
+        model = SigLIPClassifier(
+            Config.model_name,
+            Config.num_classes,
+            Config.hidden_dim,
+            Config.dropout
+        ).to(Config.device)
         
-        print(f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%")
-        print(f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%")
+        checkpoint = torch.load(f'best_model_fold{fold_idx}.pth')
+        model.load_state_dict(checkpoint['model_state'])
+        model.eval()
         
-        # 保存最佳模型
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
-            torch.save(model.state_dict(), f'best_model{best_val_acc:.2f}.pth')
-            print(f"✓ Best model saved! Val Acc: {val_acc:.2f}%")
+        # 预测
+        fold_logits = []
+        test_ids = []
+        
+        with torch.no_grad():
+            for pixel_values, text_inputs, batch_ids in tqdm(test_loader, desc=f'Fold {fold_idx}'):
+                pixel_values = pixel_values.to(Config.device)
+                input_ids = text_inputs['input_ids'].to(Config.device)
+                attention_mask = text_inputs['attention_mask'].to(Config.device)
+                
+                logits = model(pixel_values, input_ids, attention_mask)
+                fold_logits.append(logits.cpu().numpy())
+                
+                if fold_idx == 0:
+                    test_ids.extend(batch_ids)
+        
+        fold_logits = np.concatenate(fold_logits, axis=0)
+        all_fold_logits.append(fold_logits)
+        
+        # 释放内存
+        del model
+        torch.cuda.empty_cache()
     
-    # 加载最佳模型进行预测
-    print("\nLoading best model for inference...")
-    model.load_state_dict(torch.load(f'best_model{best_val_acc:.2f}.pth'))
-    model.eval()
-    
-    # 预测测试集
-    print("Predicting test set...")
-    predictions = []
-    ids = []
-    
-    with torch.no_grad():
-        for inputs,text_embs, batch_ids in tqdm(test_loader, desc='Predicting'):
-            input_ids = inputs['input_ids'].to(Config.device)
-            attention_mask = inputs['attention_mask'].to(Config.device)
-            pixel_values = inputs['pixel_values'].to(Config.device)
-            text_embs = text_embs.to(Config.device)
-            
-            logits = model(input_ids, attention_mask, pixel_values, text_embs)
-            preds = logits.argmax(dim=1).cpu().numpy()
-            
-            predictions.extend(preds)
-            ids.extend(batch_ids)
+    # 集成预测：对所有折的logits取平均
+    print("\nAveraging predictions from all folds...")
+    avg_logits = np.mean(all_fold_logits, axis=0)
+    final_predictions = np.argmax(avg_logits, axis=1)
     
     # 生成提交文件
     submission_df = pd.DataFrame({
-        'id': ids,
-        'categories': predictions
+        'id': test_ids,
+        'categories': final_predictions
     })
     submission_df.to_csv(Config.submission_file, index=False)
-    print(f"\n✓ Submission file saved to {Config.submission_file}")
-    print(f"Best validation accuracy: {best_val_acc:.2f}%")
+    print(f"\n✓ Ensemble submission file saved to {Config.submission_file}")
+    print(f"Average validation Macro-F1: {avg_macro_f1:.2f}% ± {std_macro_f1:.2f}%")
 
 if __name__ == '__main__':
     main()
