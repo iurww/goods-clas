@@ -21,8 +21,8 @@ import unicodedata
 # ==================== 配置参数 ====================
 class Config:
     # 路径配置
-    train_csv = 'data/train.csv'
-    test_csv = 'data/test.csv'
+    train_csv = 'data/compress_train.csv'
+    test_csv = 'data/compress_test.csv'
     train_images_dir = 'data/train_images/train_images'
     test_images_dir = 'data/test_images/test_images'
     submission_file = 'data/submission.csv'
@@ -40,7 +40,7 @@ class Config:
     num_epochs = 5
     learning_rate = 2e-5
     weight_decay = 0.01
-    warmup_ratio = 0.05
+    warmup_ratio = 0.08
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     seed = 42
     n_folds = 5
@@ -366,6 +366,11 @@ def main():
     
     # 训练所有折
     for fold_idx, (train_indices, val_indices) in enumerate(skf.split(train_df, train_df['categories'])):
+        if fold_idx < 0:
+            print(f"⏭️  Skipping Fold {fold_idx}...")
+            continue
+        
+        
         print(f"\n{'='*60}")
         print(f"Training Fold {fold_idx + 1}/{Config.n_folds}")
         print(f"{'='*60}")
