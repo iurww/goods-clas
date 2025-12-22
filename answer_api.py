@@ -4,24 +4,42 @@ from openai import OpenAI
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
-
 def build_prompt(title, description, max_output_length=80):
     """
-    获取答案, 给定title和description,要求模型回答一个id
+    Extract essential product information while preserving brand, key features, and usage scenarios
+    Optimized for specific product category classification
     """
     
-    #
-    prompt = f"""Task: Extract the most relevant information from product text for classification.
+    prompt = f"""Task: Compress product information into a concise, classification-ready format.
 
 Product Title: {title}
 
 Product Description: {description}
 
-Instructions:
-1. Extract key information, first convert the title to a concise item name
-2. Remove marketing fluff and promotional language and specific specification parameters
-3. Maximum {max_output_length} words
-4. Output must be concise and informative
+Requirements:
+1. MUST preserve (in order of priority):
+   - Brand name (if present)
+   - Product category/type
+   - Usage scenario/application context (e.g., "for running", "kitchen use", "outdoor camping")
+   - Key distinguishing features (color, material, main function)
+   - Size category (small/large/etc., not exact measurements)
+
+2. Pay special attention to features relevant to these categories: consumer electronics accessories, photography/storage accessories, outdoor sports/recreation (hunting, fishing, camping, water sports, ball games, fitness, cycling, martial arts, shooting), mobile phone accessories, automotive products, board games/educational toys, hardware/building materials/tools, health/personal care, daily chemicals/beauty/cosmetics, food/beverages, office/school supplies, crafts/art materials, pet supplies, outdoor/yard/gardening, apparel/fashion accessories, baby durable goods, musical instruments/audio equipment, daily consumables/small commodities, baby consumables/care products/children's care, home appliance parts/consumables, premium skincare/professional makeup/salon products/niche fragrances/adult products, electronic accessories/smart devices/digital home products.
+
+3. MUST remove:
+   - Promotional phrases ("best seller", "limited time", "buy now")
+   - Subjective claims ("amazing", "perfect", "revolutionary")
+   - Exact specifications and measurements (12.5cm → remove, not replace)
+   - Seller information and shipping details
+   - Redundant adjectives
+   - Discontinuation status
+
+4. Format:
+   - Start with brand (if exists) + product type
+   - Include usage scenario early if present
+   - Follow with 2-3 core distinguishing attributes
+   - Use concise noun phrases, avoid full sentences
+   - Maximum {max_output_length} words total
 
 Compressed Text:"""
         
@@ -162,8 +180,8 @@ def evaluate_responses(input_csv, output_csv, api_key, base_url="https://dashsco
 
 if __name__ == "__main__":
 
-    INPUT_FILE = "./data/test.csv"
-    OUTPUT_FILE = "./data/compress_test.csv"
+    INPUT_FILE = "./data/train.csv"
+    OUTPUT_FILE = "./data/compress_train.csv"
 
     API_KEY = "sk-4f4499ad108a440aafa352e6b25b64a6"
 

@@ -21,8 +21,8 @@ import unicodedata
 # ==================== 配置参数 ====================
 class Config:
     # 路径配置
-    train_csv = 'data/compress_train.csv'
-    test_csv = 'data/compress_test.csv'
+    train_csv = 'data/train.csv'
+    test_csv = 'data/test.csv'
     train_images_dir = 'data/train_images/train_images'
     test_images_dir = 'data/test_images/test_images'
     submission_file = 'data/submission.csv'
