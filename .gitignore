@@ -5,3 +5,4 @@ models/
 weights/
 *.pth
 *.csv
+*/__pycache__/
