@@ -1,17 +1,49 @@
-# import pandas as pd
+import pandas as pd
 
 # df1 = pd.read_csv('data/compress_test.csv')
-# df1['description'] = df1['description'].str.replace(r'\n', ',', regex=True)
+# df1['description'] = df1['description'].str.replace(r'— ', ' ', regex=True)
 # df1.to_csv('data/compress_test.csv', index=False)
 # exit()
 
+# give me a example usage of nn.layernorm
+# import torch
+# import torch.nn as nn
+# t = torch.randn(2, 3, 4)
+# layer_norm = nn.LayerNorm(t.size()[1:])
+# output = layer_norm(t)
+# print("Input Tensor:")
+# print(t)
+# print("\nAfter LayerNorm:")
+# print(output)
+# exit()
+    
+    
+df = pd.read_csv('submission_fold3.csv')    
+#col: id,c0,c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,c14,c15,c16,c17,c18,c19,c20
+# first get the predicted class
+preds = df.iloc[:, 1:].idxmax(axis=1)  # skip the 'id' column
+df['categories'] = preds.str.extract('c(\d+)').astype(int)
+df[['id', 'categories']].to_csv('submission_final.csv', index=False)
+exit()
 
+#second find id which prob > 0.9 
+high_confidence = df[df.iloc[:, 1:-1].max(axis=1) > 0.9]
+high_confidence[['id', 'categories']].to_csv('submission_high_confidence.csv', index=False)
+    
+# 找出每一行最大的概率值，保存为id, prob_max.csv
+max_probs = df.iloc[:, 1:-1].max(axis=1)  # skip the 'id' and 'categories' columns
+print(max_probs.describe([0.1, 0.15, 0.25, 0.5, ]))
 
+# diff_rows的id列和high_confidence的id列取交集，输出
+diff_df = pd.read_csv('diff_rows.csv')
+common_ids = pd.merge(diff_df[['id']], high_confidence[['id']], on='id')
+print(len(common_ids))
+exit()
 
 import pandas as pd
 
-a = pd.read_csv('data/submission0.88227.csv', usecols=['categories']).squeeze()
-b = pd.read_csv('data/best_submission.csv', usecols=['categories']).squeeze()
+a = pd.read_csv('data/submission0.88024.csv', usecols=['categories']).squeeze()
+b = pd.read_csv('data/submission0.88227.csv', usecols=['categories']).squeeze()
 
 diff_mask = a.ne(b)                 # 布尔序列：True=预测不同
 diff_idx  = diff_mask.index[diff_mask] + 1   # +1 变成人类友好的行号（从1起）
@@ -26,55 +58,3 @@ out = pd.DataFrame({'id'        : pd.read_csv('data/submission0.88227.csv').id[d
 print(out['pred_new'].value_counts().sort_index())
 out.to_csv('diff_rows.csv', index=False)
 exit()
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
-from transformers import AutoProcessor, AutoModel
-from PIL import Image, ImageFilter
-import pandas as pd
-import os
-from tqdm import tqdm
-import numpy as np
-from sklearn.model_selection import StratifiedKFold
-from sklearn.utils.class_weight import compute_class_weight
-from transformers import get_cosine_schedule_with_warmup
-import torchvision.transforms as transforms
-import random
-import re
-import html
-import unicodedata
-
-# ==================== 配置参数 ====================
-class Config:
-    # 路径配置
-    train_csv = 'data/compress_train.csv'
-    test_csv = 'data/compress_test.csv'
-    train_images_dir = 'data/train_images/train_images'
-    test_images_dir = 'data/test_images/test_images'
-    submission_file = 'data/submission.csv'
-    
-    model_name = './models/siglip-so400m-patch14-384'
-    
-    num_classes = 21
-    hidden_dim = 1536 
-    dropout = 0.2
-    
-    batch_size = 8
-    eval_batch_size = 16
-    num_epochs = 4
-    learning_rate = 2e-5
-    weight_decay = 0.01
-    warmup_ratio = 0.05
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    seed = 42
-    n_folds = 5
-    
-    max_text_length = 64
-    
-    image_size = 384
-    
-    use_class_weight = False
-    
-    use_fp16 = True

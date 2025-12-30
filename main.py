@@ -17,12 +17,15 @@ from functools import partial
 import re
 import html
 import unicodedata
+import gc
 
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 # ==================== 配置参数 ====================
 class Config:
     # 路径配置
     train_csv = 'data/compress_train.csv'
     test_csv = 'data/compress_test.csv'
+    test_probs = 'data/submission_probs.csv'
     train_images_dir = 'data/train_images/train_images'
     test_images_dir = 'data/test_images/test_images'
     submission_file = 'data/submission.csv'
@@ -39,8 +42,8 @@ class Config:
     eval_batch_size = 16
     num_epochs = 5
     learning_rate = 2e-5
-    weight_decay = 0.01
-    warmup_ratio = 0.08
+    weight_decay = 0.05
+    warmup_ratio = 0.1
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     seed = 42
     n_folds = 5
@@ -145,6 +148,7 @@ def get_val_transforms(image_size=384):
     ])
 
 # ==================== 数据集类 ====================
+# 对于 submission.
 class ProductDataset(Dataset):
     def __init__(self, df, image_dir, processor, transform=None, is_test=False):
         self.df = df.reset_index(drop=True)
@@ -227,6 +231,7 @@ class SigLIPClassifier(nn.Module):
         print(f"Loading SigLIP model: {model_name}")
         self.siglip = AutoModel.from_pretrained(model_name)
         # self.siglip.requires_grad_(False) 
+        # print(self.siglip)
         
         # 获取特征维度
         self.embed_dim = self.siglip.config.vision_config.hidden_size
@@ -350,7 +355,22 @@ def main():
     print("Loading data...")
     train_df = pd.read_csv(Config.train_csv, dtype=str, keep_default_na=False, quotechar='"', engine="python")
     test_df = pd.read_csv(Config.test_csv, dtype=str, keep_default_na=False, quotechar='"', engine="python")
-    
+
+    if Config.test_probs:
+        test_probs_df = pd.read_csv(Config.test_probs)
+        
+        prob_cols = [c for c in test_probs_df.columns if c.startswith('c')]
+        max_probs = test_probs_df[prob_cols].max(axis=1)
+        high_conf = test_probs_df[max_probs > 0.95].copy()
+        high_conf['categories'] = high_conf[prob_cols].idxmax(axis=1).str.replace('c', '')
+        
+        print(f'Found {len(high_conf)} high confidence test samples to add to training set.')
+        
+        additional = test_df[test_df['id'].isin(high_conf['id'])].merge(
+            high_conf[['id', 'categories']], on='id'
+        )
+        train_df = pd.concat([train_df, additional], ignore_index=True)
+        
     print(f"Train samples: {len(train_df)}")
     print(f"Test samples: {len(test_df)}")
     
@@ -369,7 +389,6 @@ def main():
         if fold_idx < 0:
             print(f"⏭️  Skipping Fold {fold_idx}...")
             continue
-        
         
         print(f"\n{'='*60}")
         print(f"Training Fold {fold_idx + 1}/{Config.n_folds}")
@@ -402,7 +421,7 @@ def main():
             train_dataset, 
             batch_size=Config.batch_size, 
             shuffle=True, 
-            num_workers=4,
+            num_workers=8,
             collate_fn=train_collate,
             pin_memory=True
         )
@@ -410,7 +429,7 @@ def main():
             val_dataset, 
             batch_size=Config.eval_batch_size, 
             shuffle=False, 
-            num_workers=4,
+            num_workers=8,
             collate_fn=train_collate,
             pin_memory=True
         )
@@ -433,7 +452,7 @@ def main():
             print(f"Using class weights: {class_weights}")
         
         # 定义损失函数和优化器
-        criterion = nn.CrossEntropyLoss(weight=class_weights)
+        criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.05)
         optimizer = torch.optim.AdamW(
             model.parameters(),
             lr=Config.learning_rate,
@@ -486,6 +505,7 @@ def main():
         # 释放内存
         del model, optimizer, scheduler, train_loader, val_loader
         torch.cuda.empty_cache()
+        gc.collect()
     
     # 打印所有折的汇总结果
     print("\n" + "="*60)
@@ -503,7 +523,7 @@ def main():
     print("Ensemble Inference on Test Set")
     print("="*60)
     
-    # 创建测试数据集
+     # 创建测试数据集
     test_dataset = ProductDataset(
         test_df, 
         Config.test_images_dir, 
@@ -523,6 +543,7 @@ def main():
     
     # 收集所有折的预测结果
     all_fold_logits = []
+    all_fold_probs = []
     test_ids = []
     
     for fold_idx in range(Config.n_folds):
@@ -555,7 +576,13 @@ def main():
                     test_ids.extend(batch_ids)
         
         fold_logits = np.concatenate(fold_logits, axis=0)
+        fold_probs = F.softmax(torch.tensor(fold_logits), dim=1).numpy()
+
+        fold_df = pd.DataFrame(fold_logits, columns=[f'c{i}' for i in range(Config.num_classes)]).insert(0, 'id', test_ids)
+        fold_df.to_csv(f'submission_fold{fold_idx}.csv', index=False)
+        
         all_fold_logits.append(fold_logits)
+        all_fold_probs.append(fold_probs)
         
         # 释放内存
         del model
@@ -564,13 +591,17 @@ def main():
     # 集成预测：对所有折的logits取平均
     print("\nAveraging predictions from all folds...")
     avg_logits = np.mean(all_fold_logits, axis=0)
-    final_predictions = np.argmax(avg_logits, axis=1)
+    avg_probs = np.mean(all_fold_probs, axis=0)
+    final_predictions = np.argmax(avg_probs, axis=1)
     
     # 生成提交文件
     submission_df = pd.DataFrame({
         'id': test_ids,
         'categories': final_predictions
     })
+    probs_df = pd.DataFrame(avg_probs, columns=[f'c{i}' for i in range(Config.num_classes)]).insert(0, 'id', test_ids)
+    probs_df.to_csv('submission_probs.csv', index=False)
+    
     submission_df.to_csv(Config.submission_file, index=False)
     print(f"\n✓ Ensemble submission file saved to {Config.submission_file}")
     print(f"Average validation Macro-F1: {avg_macro_f1:.2f}% ± {std_macro_f1:.2f}%")
