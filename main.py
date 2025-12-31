@@ -2,17 +2,16 @@
 import os
 import pandas as pd
 import numpy as np
-from tqdm import tqdm
 import random
 from functools import partial
 import gc
+import wandb
 
 from sklearn.model_selection import StratifiedKFold
 from sklearn.utils.class_weight import compute_class_weight
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from transformers import AutoProcessor
@@ -22,7 +21,7 @@ from src.config import Config
 from src.dataset import ProductDataset, collate_fn
 from src.augment import get_train_transforms, get_val_transforms
 from src.model import SigLIPClassifier
-from src.loops import train_epoch, validate
+from src.loops import train_epoch, validate, predict
 
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -30,6 +29,12 @@ def main():
     torch.manual_seed(Config.seed)
     np.random.seed(Config.seed)
     random.seed(Config.seed)
+    
+    wandb.init(
+        project="goods-classification",
+        name=f"run_{Config.timestamp}",
+        config=vars(Config)
+    )
     
     # 加载数据
     print("Loading data...")
@@ -56,7 +61,7 @@ def main():
     
     # 加载processor
     print(f"Loading SigLIP processor...")
-    processor = AutoProcessor.from_pretrained(Config.model_name)
+    processor = AutoProcessor.from_pretrained(Config.model_name, use_fast=True)
     
     # 分层K折交叉验证
     skf = StratifiedKFold(n_splits=Config.n_folds, shuffle=True, random_state=Config.seed)
@@ -152,14 +157,16 @@ def main():
         scaler = torch.amp.GradScaler() if Config.use_fp16 else None
         
         # 训练循环
-        best_macro_f1 = 0
+        best_macro_f1 = -100
         for epoch in range(Config.num_epochs):
             print(f"\nEpoch {epoch+1}/{Config.num_epochs}")
             
             train_loss, train_acc = train_epoch(
-                model, train_loader, criterion, optimizer, scheduler, Config.device, scaler
+                model, train_loader, criterion, optimizer, scheduler, Config.device, scaler, fold_idx
             )
-            val_loss, val_acc, val_macro_f1 = validate(model, val_loader, criterion, Config.device)
+            val_loss, val_acc, val_macro_f1 = validate(
+                model, val_loader, criterion, Config.device, fold_idx, epoch
+            )
             
             print(f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%")
             print(f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%, Val Macro-F1: {val_macro_f1:.2f}%")
@@ -173,7 +180,7 @@ def main():
                     'val_loss': val_loss,
                     'val_acc': val_acc,
                     'val_macro_f1': val_macro_f1
-                }, f'best_model_fold{fold_idx}.pth')
+                }, f'{Config.cur_run_dir}/weights/best_model_fold{fold_idx}.pth')
                 print(f"✓ Best model saved! Val Macro-F1: {val_macro_f1:.2f}%")
         
         print(f"\nBest Val Macro-F1 for Fold {fold_idx}: {best_macro_f1:.2f}%")
@@ -198,12 +205,13 @@ def main():
     print(f"\nAverage Macro-F1: {avg_macro_f1:.2f}% ± {std_macro_f1:.2f}%")
     print("="*60)
     
+    
     # 推理：使用所有折模型进行集成预测
     print("\n" + "="*60)
     print("Ensemble Inference on Test Set")
     print("="*60)
     
-     # 创建测试数据集
+    # 创建测试数据集
     test_dataset = ProductDataset(
         test_df, 
         Config.test_images_dir, 
@@ -221,52 +229,7 @@ def main():
         collate_fn=test_collate
     )
     
-    # 收集所有折的预测结果
-    all_fold_logits = []
-    all_fold_probs = []
-    test_ids = []
-    
-    for fold_idx in range(Config.n_folds):
-        print(f"\nPredicting with Fold {fold_idx} model...")
-        
-        # 加载该折的最佳模型
-        model = SigLIPClassifier(
-            Config.model_name,
-            Config.num_classes,
-            Config.hidden_dim,
-            Config.dropout
-        ).to(Config.device)
-        
-        checkpoint = torch.load(f'best_model_fold{fold_idx}.pth')
-        model.load_state_dict(checkpoint['model_state'])
-        model.eval()
-        
-        fold_logits = []
-        
-        with torch.no_grad():
-            for batch, batch_ids in tqdm(test_loader, desc=f'Fold {fold_idx}'):
-                pixel_values = batch['pixel_values'].to(Config.device)
-                input_ids = batch['input_ids'].to(Config.device)
-                attention_mask = batch['attention_mask'].to(Config.device)
-                
-                logits = model(pixel_values, input_ids, attention_mask)
-                fold_logits.append(logits.cpu().numpy())
-                
-                if fold_idx == 0:
-                    test_ids.extend(batch_ids)
-        
-        fold_logits = np.concatenate(fold_logits, axis=0)
-        fold_probs = F.softmax(torch.tensor(fold_logits), dim=1).numpy()
-
-        fold_df = pd.DataFrame(fold_logits, columns=[f'c{i}' for i in range(Config.num_classes)]).insert(0, 'id', test_ids)
-        fold_df.to_csv(f'submission_fold{fold_idx}.csv', index=False)
-        
-        all_fold_logits.append(fold_logits)
-        all_fold_probs.append(fold_probs)
-        
-        # 释放内存
-        del model
-        torch.cuda.empty_cache()
+    all_fold_logits, all_fold_probs, test_ids = predict(test_loader)
     
     # 集成预测：对所有折的logits取平均
     print("\nAveraging predictions from all folds...")
@@ -274,17 +237,20 @@ def main():
     avg_probs = np.mean(all_fold_probs, axis=0)
     final_predictions = np.argmax(avg_probs, axis=1)
     
-    # 生成提交文件
+    probs_df = pd.DataFrame(avg_probs, columns=[f'c{i}' for i in range(Config.num_classes)])
+    probs_df.insert(0, 'id', test_ids)
+    probs_df.to_csv(f'{Config.cur_run_dir}/submission_probs.csv', index=False)
+    table = wandb.Table(dataframe=probs_df)
+    wandb.log({"predict/probs": table})
+    
     submission_df = pd.DataFrame({
         'id': test_ids,
         'categories': final_predictions
     })
-    probs_df = pd.DataFrame(avg_probs, columns=[f'c{i}' for i in range(Config.num_classes)]).insert(0, 'id', test_ids)
-    probs_df.to_csv('submission_probs.csv', index=False)
-    
-    submission_df.to_csv(Config.submission_file, index=False)
-    print(f"\n✓ Ensemble submission file saved to {Config.submission_file}")
-    print(f"Average validation Macro-F1: {avg_macro_f1:.2f}% ± {std_macro_f1:.2f}%")
+    submission_df.to_csv(f'{Config.cur_run_dir}/submission.csv', index=False)
+    table = wandb.Table(dataframe=submission_df)
+    wandb.log({"predict/submission": table})
+    print(f"✓ Ensemble submission file saved to {Config.cur_run_dir}/submission.csv")
 
 if __name__ == '__main__':
     main()

@@ -4,61 +4,45 @@ from openai import OpenAI
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
-
 def build_prompt(title, description, max_output_length=80):
-    prompt = f"""
-You are a product classification feature engineer.
+    """
+    Extract essential product information while preserving brand, key features, and usage scenarios
+    Optimized for specific product category classification
+    """
+    
+    prompt = f"""Task: Compress product information into a concise, classification-ready format.
 
-Your task is NOT to summarize the product.
-Your task is to extract the MOST discriminative keywords and phrases
-that determine the product's TRUE category.
+Product Title: {title}
 
-The final goal is to classify the product into ONE of the following categories:
+Product Description: {description}
 
-0. Traditional consumer electronics & photography / storage accessories
-1. Outdoor sports & recreation (hunting, fishing, camping, water sports, fitness, cycling, martial arts)
-2. Mobile phone accessories
-3. Automotive parts & accessories
-4. Board games & educational toys
-5. Hardware, building materials & tools
-6. Health & personal care devices
-7. Daily chemical, beauty & personal wash products
-8. Food & beverages
-9. Office & study supplies
-10. Handicraft / art materials & tools
-11. Pet supplies
-12. Outdoor, yard & gardening supplies
-13. Apparel & fashion accessories
-14. Baby durable goods (hardware / non-consumable)
-15. Musical instruments & audio equipment
-16. Daily-use small commodities / general consumables
-17. Baby consumables & care products
-18. Home appliance accessories & consumables
-19. High-end skincare, professional makeup, salon / medical beauty, niche fragrance, adult products
-20. Electronic accessories, smart devices & digital home products
+Requirements:
+1. MUST preserve (in order of priority):
+   - Brand name (if present)
+   - Product category/type
+   - Usage scenario/application context (e.g., "for running", "kitchen use", "outdoor camping")
+   - Key distinguishing features (color, material, main function)
+   - Size category (small/large/etc., not exact measurements)
 
-Rules:
-- Ignore marketing language, emotions, and vague adjectives.
-- Focus on WHAT the product IS, WHAT it DOES, and WHO it is FOR.
-- Extract features that clearly distinguish this product from similar categories.
-- If something strongly implies electronics, consumables, baby use, pet use, or vehicles, it MUST be reflected.
+2. Pay special attention to features relevant to these categories: consumer electronics accessories, photography/storage accessories, outdoor sports/recreation (hunting, fishing, camping, water sports, ball games, fitness, cycling, martial arts, shooting), mobile phone accessories, automotive products, board games/educational toys, hardware/building materials/tools, health/personal care, daily chemicals/beauty/cosmetics, food/beverages, office/school supplies, crafts/art materials, pet supplies, outdoor/yard/gardening, apparel/fashion accessories, baby durable goods, musical instruments/audio equipment, daily consumables/small commodities, baby consumables/care products/children's care, home appliance parts/consumables, premium skincare/professional makeup/salon products/niche fragrances/adult products, electronic accessories/smart devices/digital home products.
 
-Output format (strictly follow this structure):
+3. MUST remove:
+   - Promotional phrases ("best seller", "limited time", "buy now")
+   - Subjective claims ("amazing", "perfect", "revolutionary")
+   - Exact specifications and measurements (12.5cm → remove, not replace)
+   - Seller information and shipping details
+   - Redundant adjectives
+   - Discontinuation status
 
-core_object: <1-3 noun phrases>
-functional_features: <comma-separated key technical or functional terms>
-usage_scenario: <main usage context or target user>
-category_signal_keywords: <keywords that strongly indicate the correct category>
+4. Format:
+   - Start with brand (if exists) + product type
+   - Include usage scenario early if present
+   - Follow with 2-3 core distinguishing attributes
+   - Use concise noun phrases, avoid full sentences
+   - Maximum {max_output_length} words total
 
-Limit the entire output to {max_output_length} tokens.
-Do NOT include explanations or full sentences.
-
-Product title:
-{title}
-
-Product description:
-{description}
-"""
+Compressed Text:"""
+        
     return prompt
 
 def call_llm_api(client, prompt, model="qwen-plus", max_retries=3):
@@ -105,22 +89,22 @@ def evaluate_single_row(client, row, model):
             return {
                 'id': row['id'],
                 'description': row['title'] + row['description'],
-                # 'categories': row['categories'],
+                'label': row['categories'],
                 'index': row.name
             }
 
         return {
             'id': row['id'],
             'description': compress,
-            # 'categories': row['categories'],
+            'label': row['categories'],
             'index': row.name
         }
     except Exception as e:
         print(f"压缩第 {row['id']} 行时出错 in single: {str(e)}")
         return {
             'id': row['id'],
-            'description': -1,
-            # 'categories': row['categories'],
+            'description': row['title'] + row['description'],
+            'label': row['categories'],
             'index': row.name
         }
 
@@ -176,8 +160,8 @@ def evaluate_responses(input_csv, output_csv, api_key, base_url="https://dashsco
                 print(f"处理第 {row['id']} 行时发生异常: {str(e)}")
                 results.append({
                     'id': row['id'],
-                    'description': -1,
-                    # 'categories': row['categories'],
+                    'description': row['title'] + row['description'],
+                    'label': row['categories'],
                     'index': row.name
                 })
 
@@ -196,10 +180,10 @@ def evaluate_responses(input_csv, output_csv, api_key, base_url="https://dashsco
 
 if __name__ == "__main__":
 
-    INPUT_FILE = "./data/test.csv"
-    OUTPUT_FILE = "./data/compress_test.csv"
+    INPUT_FILE = "./data/train.csv"
+    OUTPUT_FILE = "./data/compress_train.csv"
 
-    API_KEY = "sk-4f4499ad108a440aafa352e6b25b64a6"
+    API_KEY = "YOUR_API_KEY"
 
     BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     MODEL = "qwen-plus"  # 可选: qwen-turbo, qwen-plus, qwen-max
@@ -223,7 +207,7 @@ if __name__ == "__main__":
         api_key=API_KEY,
         base_url=BASE_URL,
         model=MODEL,
-        max_workers=40  # 可以根据API限流情况调整，建议10-20
+        max_workers=20  # 可以根据API限流情况调整，建议10-20
     )
 
     print("\n前10条结果:")

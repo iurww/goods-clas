@@ -3,6 +3,8 @@ data/
 *.zip
 models/
 weights/
+results/
+wandb/
 *.pth
 *.csv
 */__pycache__/

@@ -1,42 +1,99 @@
+import argparse
+import sys
+from datetime import datetime
+import json
+import os
+
 import torch
 
-class Config:
-    # 路径配置
-    train_csv = 'data/compress_train.csv'
-    test_csv = 'data/compress_test.csv'
-    test_probs = 'data/submission_probs.csv'
-    train_images_dir = 'data/train_images/train_images'
-    test_images_dir = 'data/test_images/test_images'
-    submission_file = 'data/submission.csv'
+from typing import Any, Dict
+from dataclasses import dataclass, asdict
+
+
+@dataclass
+class _Config:
+    # ===== 路径配置 =====
+    train_csv: str = 'data/compress_train.csv'
+    test_csv: str = 'data/compress_test.csv'
+    test_probs: str = None
+    train_images_dir: str = 'data/train_images/train_images'
+    test_images_dir: str = 'data/test_images/test_images'
+    results_dir: str = 'results/'
+    checkpoint_dir: str = ''
+
+    # ===== 模型配置 =====
+    model_name: str = './models/siglip-so400m-patch14-384'
+    num_classes: int = 21
+    hidden_dim: int = 1536
+    dropout: float = 0.2
+    max_text_length: int = 64
+    image_size: int = 384
+
+    # ===== 训练配置 =====
+    batch_size: int = 8
+    eval_batch_size: int = 16
+    num_epochs: int = 2
+    learning_rate: float = 2e-5
+    weight_decay: float = 0.05
+    warmup_ratio: float = 0.1
+    device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
+    seed: int = 42
+    n_folds: int = 3
+    skip_folds: int = 0
+    use_class_weight: bool = False
+    use_fp16: bool = True
     
-    # 模型配置 - 使用SigLIP模型
-    model_name = './models/siglip-so400m-patch14-384'
+    log_interval: int = 2
     
-    num_classes = 21
-    hidden_dim = 1536  # 分类头隐藏层维度
-    dropout = 0.2
+    _timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     
-    # 训练配置
-    batch_size = 8
-    eval_batch_size = 16
-    num_epochs = 5
-    learning_rate = 2e-5
-    weight_decay = 0.05
-    warmup_ratio = 0.1
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    seed = 42
-    n_folds = 5
+    @property
+    def timestamp(self):
+        return self._timestamp
+    @property
+    def cur_run_dir(self):
+        return os.path.join(self.results_dir, self._timestamp)
     
-    # SigLIP文本最大长度上限
-    max_text_length = 64
-    
-    # 图像配置
-    image_size = 384
-    
-    # 是否使用类别权重
-    use_class_weight = False
-    
-    # 混合精度训练
-    use_fp16 = True
-    
-    skip_folds = 0
+
+def _merge_args_to_config(args: argparse.Namespace, cfg: _Config) -> None:
+    cfg_dict: Dict[str, Any] = _Config.__dict__
+    for k, v in vars(args).items():
+        if k in cfg_dict and not k.startswith('_'):
+            if isinstance(getattr(type(cfg), k, None), property):
+                continue
+            if isinstance(cfg_dict[k], bool) and not isinstance(v, bool):
+                v = v.lower() in ('true', '1', 'yes', 'on')
+            setattr(cfg, k, v)
+   
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="SigLIP 训练推理配置")
+    cfg_dict = _Config.__dict__
+    for k, v in cfg_dict.items():
+        if k.startswith('_'):
+            continue
+        if isinstance(v, bool):
+            parser.add_argument(f'--{k}', action='store_true' if not v else 'store_false',
+                                help=f"覆盖默认 {k}={v}")
+        else:
+            parser.add_argument(f'--{k}', type=type(v), default=v,
+                                help=f"覆盖默认 {k}={v}")
+    return parser
+
+Config = _Config()
+
+if any(arg.startswith('--') for arg in sys.argv):
+    _parser = _build_parser()
+    _known, _unknown = _parser.parse_known_args()
+    _merge_args_to_config(_known, Config)
+    print("Using command-line arguments to override config:")
+
+
+os.makedirs(Config.results_dir, exist_ok=True)
+os.makedirs(Config.cur_run_dir, exist_ok=True)
+os.makedirs(os.path.join(Config.cur_run_dir, 'weights'), exist_ok=True)
+with open(os.path.join(Config.cur_run_dir, 'config.json'), 'w') as f:   
+    json.dump({k: v for k, v in asdict(Config).items() if not k.startswith('_')}, f, indent=4)
+
+
+def merge_config(args: argparse.Namespace) -> None:
+    _merge_args_to_config(args, Config)
