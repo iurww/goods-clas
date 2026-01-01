@@ -20,15 +20,6 @@ from src.loops import predict
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
 def main():
-    torch.manual_seed(Config.seed)
-    np.random.seed(Config.seed)
-    random.seed(Config.seed)
-    
-    wandb.init(
-        project="goods-classification",
-        name=f"run_predict_{Config.timestamp}",
-        config=vars(Config)
-    )
     
     test_df = pd.read_csv(Config.test_csv, dtype=str, keep_default_na=False, quotechar='"', engine="python")
     print(f"Test samples: {len(test_df)}")
@@ -64,27 +55,37 @@ def main():
         all_fold_logits, all_fold_probs, test_ids = predict(test_loader, checkpoint_path=Config.checkpoint_dir)
     else:
         raise ValueError("Please provide the checkpoint_dir in Config for inference.")
-    
-    # 集成预测：对所有折的logits取平均
+
+
     print("\nAveraging predictions from all folds...")
-    avg_logits = np.mean(all_fold_logits, axis=0)
     avg_probs = np.mean(all_fold_probs, axis=0)
     final_predictions = np.argmax(avg_probs, axis=1)
-    
-    probs_df = pd.DataFrame(avg_probs, columns=[f'c{i}' for i in range(Config.num_classes)])
+
+    # 保存概率文件
+    probs_df = pd.DataFrame({'id': test_ids, **{f'c{i}': avg_probs[:, i] for i in range(Config.num_classes)}})
     probs_df.insert(0, 'id', test_ids)
     probs_df.to_csv(f'{Config.cur_run_dir}/submission_probs.csv', index=False)
-    table = wandb.Table(dataframe=probs_df)
-    wandb.log({"predict/probs": table})
-    
-    submission_df = pd.DataFrame({
-        'id': test_ids,
-        'categories': final_predictions
-    })
-    submission_df.to_csv(f'{Config.cur_run_dir}/submission.csv', index=False)
-    table = wandb.Table(dataframe=submission_df)
-    wandb.log({"predict/submission": table})
-    print(f"\n✓ Ensemble submission file saved to {Config.cur_run_dir}/submission.csv")
+    wandb.save(f'{Config.cur_run_dir}/submission_probs.csv')
 
+    # 保存提交文件
+    submission_df = pd.DataFrame({'id': test_ids, 'categories': final_predictions})
+    submission_df.to_csv(f'{Config.cur_run_dir}/submission.csv', index=False)
+    wandb.save(f'{Config.cur_run_dir}/submission.csv')
+
+    print(f"\n✓ Files saved to {Config.cur_run_dir}/")
+    
 if __name__ == '__main__':
+    
+    torch.manual_seed(Config.seed)
+    np.random.seed(Config.seed)
+    random.seed(Config.seed)
+    
+    wandb.init(
+        project="goods-classification",
+        name=f"run_predict_{Config.timestamp}",
+        config=vars(Config)
+    )
+    
     main()
+    
+    wandb.finish()

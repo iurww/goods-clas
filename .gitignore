@@ -8,3 +8,4 @@ wandb/
 *.pth
 *.csv
 */__pycache__/
+test.py

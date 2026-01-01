@@ -11,6 +11,7 @@ import wandb
 
 from .config import Config
 from .model import SigLIPClassifier
+from .utils import save_confusion_matrix
 
 
 def train_epoch(model, dataloader, criterion, optimizer, scheduler, device, scaler=None, fold_idx=0):
@@ -109,23 +110,24 @@ def validate(model, dataloader, criterion, device, fold_idx=0, epoch=0):
     })
     
     if epoch == Config.num_epochs - 1:
-        print(f"Unique classes in all_labels: {np.unique(all_labels)}")
-        print(f"Number of unique classes: {len(np.unique(all_labels))}")
+        confusion_mtx_path = f"{Config.cur_run_dir}/confusion_matrix_fold{fold_idx}.png"
+        
+        save_confusion_matrix(confusion_mtx_path, all_preds, all_labels, Config.num_classes)
+        
+        wandb.log({f'fold_{fold_idx}/val/confusion_matrix_image': wandb.Image(confusion_mtx_path)})
+        
         wandb.log({
             f'fold_{fold_idx}/val/confusion_matrix': wandb.plot.confusion_matrix(
-                probs=None,
+                probs=all_probs,
                 y_true=all_labels,
-                preds=all_preds,
+                # preds=all_preds,
                 class_names=[f'{i:02d}' for i in range(Config.num_classes)]
             )
         })
+        
         wandb.log({
-            f'fold_{fold_idx}/val/pr_curve': wandb.plot.pr_curve(
-                y_true=all_labels,
-                y_probas=all_probs,
-                labels=[i for i in range(Config.num_classes)],
-                classes_to_plot=[f'{i:02d}' for i in range(Config.num_classes)]
-            )
+            f"fold_{fold_idx}/val/roc": wandb.plot.roc_curve(all_labels, all_probs),
+            f"fold_{fold_idx}/val/pr":  wandb.plot.pr_curve(all_labels, all_probs)
         })
     
     return epoch_average_loss, epoch_accuracy, macro_f1
