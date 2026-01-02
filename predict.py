@@ -74,16 +74,16 @@ def main():
     print(f"\n✓ Files saved to {Config.cur_run_dir}/")
     
 if __name__ == '__main__':
-    
-    torch.manual_seed(Config.seed)
-    np.random.seed(Config.seed)
-    random.seed(Config.seed)
-    
+        
     wandb.init(
         project="goods-classification",
         name=f"run_predict_{Config.timestamp}",
         config=vars(Config)
     )
+    
+    torch.manual_seed(Config.seed)
+    np.random.seed(Config.seed)
+    random.seed(Config.seed)
     
     main()
     

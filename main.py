@@ -238,15 +238,15 @@ def main():
     wandb.save(f'{Config.cur_run_dir}/submission.csv')
 
 if __name__ == '__main__':
-    torch.manual_seed(Config.seed)
-    np.random.seed(Config.seed)
-    random.seed(Config.seed)
-    
     wandb.init(
         project="goods-classification",
         name=f"run_{Config.timestamp}",
         config=vars(Config)
     )
+    
+    torch.manual_seed(Config.seed)
+    np.random.seed(Config.seed)
+    random.seed(Config.seed)
     
     main()
     

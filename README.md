@@ -108,7 +108,7 @@ data/
 mkdir -p models
 
 # 下载模型（使用 huggingface-cli）
-huggingface-cli download google/siglip-so400m-patch14-384 --local-dir models/siglip-so400m-patch14-384
+hf download google/siglip-so400m-patch14-384 --local-dir models/siglip-so400m-patch14-384
 ```
 
 模型下载后，目录结构应为：
