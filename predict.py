@@ -63,7 +63,6 @@ def main():
 
     # 保存概率文件
     probs_df = pd.DataFrame({'id': test_ids, **{f'c{i}': avg_probs[:, i] for i in range(Config.num_classes)}})
-    probs_df.insert(0, 'id', test_ids)
     probs_df.to_csv(f'{Config.cur_run_dir}/submission_probs.csv', index=False)
     wandb.save(f'{Config.cur_run_dir}/submission_probs.csv')
 

@@ -9,7 +9,7 @@ class SigLIPClassifier(nn.Module):
         
         print(f"Loading SigLIP model: {model_name}")
         self.siglip = AutoModel.from_pretrained(model_name)
-        self.siglip.requires_grad_(False) 
+        # self.siglip.requires_grad_(False) 
         # print(self.siglip)
         
         self.embed_dim = self.siglip.config.vision_config.hidden_size

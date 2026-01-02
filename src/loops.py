@@ -20,11 +20,10 @@ def train_epoch(model, dataloader, criterion, optimizer, scheduler, device, scal
     correct = 0
     total = 0
 
-
     pbar = tqdm(dataloader, desc='Training')
     for step, (batch, labels) in enumerate(pbar):
-        if step > 200:
-            break
+        # if step > 200:
+        #     break
         pixel_values = batch['pixel_values'].to(device)
         input_ids = batch['input_ids'].to(device)
         attention_mask = batch['attention_mask'].to(device)
@@ -81,8 +80,8 @@ def validate(model, dataloader, criterion, device, fold_idx=0, epoch=0):
     
     with torch.no_grad():
         for step, (batch, labels) in enumerate(tqdm(dataloader, desc='Validating')):
-            if step > 40:
-                break
+            # if step > 40:
+            #     break
             pixel_values = batch['pixel_values'].to(device)
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
@@ -158,8 +157,8 @@ def predict(dataloader, checkpoint_path=None):
         
         with torch.no_grad():
             for step, (batch, batch_ids) in enumerate(tqdm(dataloader, desc=f'Fold {fold_idx}')):
-                if step > 5:
-                    break
+                # if step > 5:
+                #     break
                 pixel_values = batch['pixel_values'].to(Config.device)
                 input_ids = batch['input_ids'].to(Config.device)
                 attention_mask = batch['attention_mask'].to(Config.device)
@@ -173,9 +172,8 @@ def predict(dataloader, checkpoint_path=None):
         fold_logits = np.concatenate(fold_logits, axis=0)
         fold_probs = F.softmax(torch.tensor(fold_logits), dim=1).numpy()
 
-        # fold_df = pd.DataFrame(fold_logits, columns=[f'c{i}' for i in range(Config.num_classes)])
-        # fold_df.insert(0, 'id', test_ids)
-        # fold_df.to_csv(f'{Config.cur_run_dir}/submission_fold{fold_idx}.csv', index=False)
+        fold_df = pd.DataFrame({'id': test_ids, **{f'c{i}': fold_logits[:, i] for i in range(Config.num_classes)}})
+        fold_df.to_csv(f'{Config.cur_run_dir}/fold{fold_idx}_logits.csv', index=False)
         
         all_fold_logits.append(fold_logits)
         all_fold_probs.append(fold_probs)
