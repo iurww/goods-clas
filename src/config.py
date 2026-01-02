@@ -13,8 +13,8 @@ from dataclasses import dataclass, asdict
 @dataclass
 class _Config:
     # ===== 路径配置 =====
-    train_csv: str = 'data/compress_train.csv'
-    test_csv: str = 'data/compress_test.csv'
+    train_csv: str = 'data/train.csv'
+    test_csv: str = 'data/test.csv'
     test_probs: str = None
     train_images_dir: str = 'data/train_images/train_images'
     test_images_dir: str = 'data/test_images/test_images'
