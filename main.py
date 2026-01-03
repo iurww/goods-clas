@@ -97,7 +97,7 @@ def main():
             train_dataset, 
             batch_size=Config.batch_size, 
             shuffle=True, 
-            num_workers=8,
+            num_workers=4,
             collate_fn=train_collate,
             pin_memory=True
         )
@@ -105,7 +105,7 @@ def main():
             val_dataset, 
             batch_size=Config.eval_batch_size, 
             shuffle=False, 
-            num_workers=8,
+            num_workers=4,
             collate_fn=train_collate,
             pin_memory=True
         )
@@ -128,7 +128,7 @@ def main():
             print(f"Using class weights: {class_weights}")
         
         # 定义损失函数和优化器
-        criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.05)
+        criterion = nn.CrossEntropyLoss(weight=class_weights)
         optimizer = torch.optim.AdamW(
             model.parameters(),
             lr=Config.learning_rate,
