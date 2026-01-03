@@ -9,3 +9,4 @@ wandb/
 *.csv
 */__pycache__/
 test.py
+figures/
