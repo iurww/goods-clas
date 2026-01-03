@@ -156,8 +156,8 @@ def plot_roc_curves(all_labels, all_probs, num_classes, save_dir, fold_idx=0):
     else:
         # 类别多时，只绘制AUC最高和最低的几个类别
         sorted_classes = sorted(roc_auc_dict.items(), key=lambda x: x[1], reverse=True)
-        top_classes = [c[0] for c in sorted_classes[:3]]
-        bottom_classes = [c[0] for c in sorted_classes[-3:]]
+        top_classes = [c[0] for c in sorted_classes[:4]]
+        bottom_classes = [c[0] for c in sorted_classes[-4:]]
         selected_classes = top_classes + bottom_classes
         
         for i in selected_classes:
@@ -279,8 +279,8 @@ def plot_pr_curves(all_labels, all_probs, num_classes, save_dir, fold_idx=0):
     else:
         # 类别多时，只绘制AP最高和最低的几个类别
         sorted_classes = sorted(ap_dict.items(), key=lambda x: x[1], reverse=True)
-        top_classes = [c[0] for c in sorted_classes[:3]]
-        bottom_classes = [c[0] for c in sorted_classes[-3:]]
+        top_classes = [c[0] for c in sorted_classes[:4]]
+        bottom_classes = [c[0] for c in sorted_classes[-4:]]
         selected_classes = top_classes + bottom_classes
         
         for i in selected_classes:
