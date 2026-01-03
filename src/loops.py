@@ -200,6 +200,7 @@ def predict(dataloader, checkpoint_path=None):
 
         fold_df = pd.DataFrame({'id': test_ids, **{f'c{i}': fold_logits[:, i] for i in range(Config.num_classes)}})
         fold_df.to_csv(f'{Config.cur_run_dir}/fold{fold_idx}_logits.csv', index=False)
+        wandb.save(f'{Config.cur_run_dir}/fold{fold_idx}_logits.csv')
         
         all_fold_logits.append(fold_logits)
         all_fold_probs.append(fold_probs)
