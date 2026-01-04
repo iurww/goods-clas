@@ -1,3 +1,4 @@
+import logging
 
 import torch
 import torch.nn as nn
@@ -7,9 +8,9 @@ class SigLIPClassifier(nn.Module):
     def __init__(self, model_name, num_classes, hidden_dim, dropout):
         super(SigLIPClassifier, self).__init__()
         
-        print(f"Loading SigLIP model: {model_name}")
+        logging.info(f"Loading SigLIP model: {model_name}")
         self.siglip = AutoModel.from_pretrained(model_name)
-        # self.siglip.requires_grad_(False) 
+        self.siglip.requires_grad_(False) 
         # print(self.siglip)
         
         self.embed_dim = self.siglip.config.vision_config.hidden_size
@@ -22,8 +23,8 @@ class SigLIPClassifier(nn.Module):
             nn.Linear(hidden_dim, num_classes)
         )
         
-        print(f"Model loaded. Embed dim: {self.embed_dim}")
-        print(f"Trainable parameters: {sum(p.numel() for p in self.parameters() if p.requires_grad):,}")
+        logging.info(f"Model loaded. Embed dim: {self.embed_dim}")
+        logging.info(f"Trainable parameters: {sum(p.numel() for p in self.parameters() if p.requires_grad):,}")
     
     def forward(self, pixel_values, input_ids, attention_mask):
         outputs = self.siglip(
