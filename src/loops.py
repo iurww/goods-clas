@@ -110,7 +110,7 @@ def validate(model, dataloader, criterion, device, fold_idx=0, epoch=0):
     
     all_labels = np.array(all_labels, dtype=np.int64)      # shape (N,)
     all_preds  = np.array(all_preds,  dtype=np.int64)      # shape (N,)
-    all_probs  = np.array(all_probs,  dtype=np.float64)    # shape (N, K)
+    all_probs  = np.array(all_probs,  dtype=np.float32)    # shape (N, K)
    
     if epoch == Config.num_epochs - 1:
         confusion_mtx_path = f"{Config.cur_run_dir}/confusion_matrix_fold{fold_idx}.png"

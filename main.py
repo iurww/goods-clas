@@ -52,7 +52,7 @@ def main():
     
     # 加载processor
     print(f"Loading SigLIP processor...")
-    processor = AutoProcessor.from_pretrained(Config.model_name, use_fast=True)
+    processor = AutoProcessor.from_pretrained(Config.model_name, use_fast=False)
     
     # 分层K折交叉验证
     skf = StratifiedKFold(n_splits=Config.n_folds, shuffle=True, random_state=Config.seed)
