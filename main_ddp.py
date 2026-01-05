@@ -102,8 +102,8 @@ def train_epoch_ddp(model, dataloader, criterion, optimizer, scheduler, device, 
     pbar = tqdm(dataloader, desc=f'Training [Rank {rank}]', disable=not is_main_process(rank))
     
     for step, (batch, labels) in enumerate(pbar):
-        if step > 20:
-            break
+        # if step > 20:
+        #     break
         pixel_values = batch['pixel_values'].to(device, non_blocking=True)
         input_ids = batch['input_ids'].to(device, non_blocking=True)
         attention_mask = batch['attention_mask'].to(device, non_blocking=True)
@@ -178,8 +178,8 @@ def validate_ddp(model, dataloader, criterion, device, fold_idx=0, epoch=0, rank
         pbar = tqdm(dataloader, desc=f'Validating [Rank {rank}]', disable=not is_main_process(rank))
         
         for step, (batch, labels) in enumerate(pbar):
-            if step > 5:
-                break
+            # if step > 5:
+            #     break
             pixel_values = batch['pixel_values'].to(device, non_blocking=True)
             input_ids = batch['input_ids'].to(device, non_blocking=True)
             attention_mask = batch['attention_mask'].to(device, non_blocking=True)
@@ -275,8 +275,8 @@ def predict_ddp(model, dataloader, device, fold_idx=0, rank=0, world_size=1):
         pbar = tqdm(dataloader, desc=f'Predicting [Rank {rank}]', disable=not is_main_process(rank))
         
         for step, (batch, batch_ids) in enumerate(pbar):
-            if step > 20:   
-                break
+            # if step > 20:   
+            #     break
             pixel_values = batch['pixel_values'].to(device, non_blocking=True)
             input_ids = batch['input_ids'].to(device, non_blocking=True)
             attention_mask = batch['attention_mask'].to(device, non_blocking=True)

@@ -32,13 +32,13 @@ class _Config:
     # ===== 训练配置 =====
     batch_size: int = 8
     eval_batch_size: int = 16
-    num_epochs: int = 2
+    num_epochs: int = 5
     learning_rate: float = 2e-5
     weight_decay: float = 0.01
     warmup_ratio: float = 0.05
     device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
     seed: int = 42
-    n_folds: int = 2
+    n_folds: int = 5
     skip_folds: int = 0
     use_class_weight: bool = False
     use_fp16: bool = True
